@@ -235,7 +235,7 @@ handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJ
                                 , text    = mkEvalErrorSummary err
                                 }
                             })
-                        ++ ((parseFailedJobEvals err) <&> \(job, msg) -> GitHub.CheckRun owner repo $ GitHub.CheckRunPayload
+                        ++ ((parseFailedJobEvals {- err -} "") <&> \(job, msg) -> GitHub.CheckRun owner repo $ GitHub.CheckRunPayload
                             { name        = "ci/eval:" <> job
                             , headSha     = hash
                             , detailsUrl  = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors"
