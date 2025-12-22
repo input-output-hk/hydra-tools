@@ -37,4 +37,5 @@
     ];
     allow-import-from-derivation = "true";
   };
+
 }
