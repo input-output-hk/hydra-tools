@@ -440,7 +440,6 @@ handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJ
                               then Nothing
                               else -- TODO: We should include some meta information about the build. Similar to what hydra provides on the
                               -- build page.
-
                                 let limit = 65535
                                     maxLines = foldr' max 0 $ failedStepLogs <&> \(_, _, logs) -> maybe 0 length logs
                                     indentPrefix = cs $ indentLine "" :: String
