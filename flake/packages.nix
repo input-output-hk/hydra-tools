@@ -19,7 +19,7 @@
         (final: prev: {
           hydra-tools = final.haskell-nix.project' {
             src = ../.;
-            compiler-nix-name = "ghc910";
+            compiler-nix-name = "ghc96";
             inputMap = {
               "https://github.com/input-output-hk/servant-github-webhook" = inputs.servant-github-webhook;
               "https://github.com/cuedo/github-webhooks" = inputs.github-webhooks;
@@ -29,7 +29,7 @@
               tools = {
                 cabal = "latest";
                 haskell-language-server = "2.12.0.0";
-                hlint = "3.10";
+                hlint = "3.8";
                 weeder = "2.10.0";
               };
 
