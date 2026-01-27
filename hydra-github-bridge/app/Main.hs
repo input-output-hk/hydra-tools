@@ -5,7 +5,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE NoFieldSelectors #-}
 
 module Main where
 
@@ -13,6 +12,7 @@ import Control.Concurrent.Async as Async
 import Control.Monad
 import Data.ByteString.Char8 qualified as BS
 import Data.IORef (newIORef, IORef)
+import qualified Data.ByteString.Char8 as C8
 import Data.List (find)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
@@ -31,6 +31,9 @@ import System.IO
     stdout,
   )
 import Data.ByteString.Char8 (ByteString)
+import Lib (hydraClient, hydraClientEnv, app, gitHubKey)
+import Lib (HydraClientEnv(..))
+import Network.Wai.Handler.Warp (run)
 
 fetchGitHubTokens :: Int -> FilePath -> Text -> BS.ByteString -> IO [(String, GitHub.TokenLease)]
 fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent = do
@@ -72,11 +75,15 @@ main = do
   -- Read environment variables
   host <- maybe "localhost" id <$> lookupEnv "HYDRA_HOST"
   db <- maybe "localhost" id <$> lookupEnv "HYDRA_DB"
-  user <- maybe mempty id <$> lookupEnv "HYDRA_USER"
-  pass <- maybe mempty id <$> lookupEnv "HYDRA_PASS"
+  db_user <- maybe mempty id <$> lookupEnv "HYDRA_DB_USER"
+  db_pass <- maybe mempty id <$> lookupEnv "HYDRA_DB_PASS"
+  api_user <- maybe mempty Text.pack <$> lookupEnv "HYDRA_API_USER"
+  api_pass <- maybe mempty Text.pack <$> lookupEnv "HYDRA_API_PASS"
+  port <- maybe 8080 read <$> lookupEnv "PORT"
   stateDir <- getEnv "HYDRA_STATE_DIR"
   ghEndpointUrl <- Text.pack . maybe "https://api.github.com" id <$> lookupEnv "GITHUB_ENDPOINT_URL"
   ghUserAgent <- maybe "hydra-github-bridge" cs <$> lookupEnv "GITHUB_USER_AGENT"
+  ghKey <- maybe mempty C8.pack <$> lookupEnv "GITHUB_WEBHOOK_SECRET"
 
   -- Authenticate to GitHub
   ghAppId <- getEnv "GITHUB_APP_ID" >>= return . read
@@ -84,23 +91,45 @@ main = do
   -- ghTokens is basically [(String, Token)]
   ghTokens <- fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent >>= newIORef
 
+  putStrLn $ "Connecting to Hydra at " <> host
+  env <- hydraClientEnv (Text.pack host) api_user api_pass
+
+  putStrLn $ "Server is starting on port " ++ show port
+
   -- Start the app loop
   let numWorkers = 10 -- default number of workers
       getValidGitHubToken' = getValidGitHubToken ghTokens ghEndpointUrl ghUserAgent
   eres <-
     Async.race
-      ( Async.replicateConcurrently_
-          numWorkers
-          ( withConnect 
-              (ConnectInfo db 5432 user pass "hydra") 
-              (statusHandlers ghEndpointUrl ghUserAgent getValidGitHubToken')
+      ( Async.race
+          ( Async.replicateConcurrently_
+              numWorkers
+              ( withConnect 
+                  (ConnectInfo db 5432 db_user db_pass "hydra") 
+                  (statusHandlers ghEndpointUrl ghUserAgent getValidGitHubToken')
+              )
+          )
+          ( withConnect
+              (ConnectInfo db 5432 db_user db_pass "hydra")
+              (notificationWatcher host stateDir)
           )
       )
-      ( withConnect
-          (ConnectInfo db 5432 user pass "hydra")
-          (notificationWatcher host stateDir)
+      ( Async.race
+          ( withConnect (ConnectInfo db 5432 db_user db_pass "hydra") $ \conn -> do
+              hydraClient env conn
+          )
+          ( withConnect (ConnectInfo db 5432 db_user db_pass "hydra") $ \conn -> do
+              run port (app (hceClientEnv env) conn (gitHubKey ghKey))
+          )
       )
+
   either
-    (const . putStrLn $ "statusHandler exited")
-    (const . putStrLn $ "withConnect exited")
+    ( either
+        (const . putStrLn $ "statusHandler exited")
+        (const . putStrLn $ "withConnect exited")
+    )
+    ( either
+        (const . putStrLn $ "hydraClient exited") 
+        (const . putStrLn $ "app exited")
+    )
     eres
