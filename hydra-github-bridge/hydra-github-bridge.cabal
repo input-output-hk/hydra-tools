@@ -14,6 +14,7 @@ common common
     default-language: Haskell2010
     build-depends:    base >=4.16 && < 5
                     , aeson
+                    , aeson-schemas
                     , aeson-casing
                     , async
                     , human-readable-duration
@@ -24,6 +25,7 @@ common common
                     , crypton-x509-store
                     , bz2
                     , string-conversions
+                    , github-webhooks
                     , github-rest >= 1.2
                     , regex-tdfa
                     , mtl
@@ -33,6 +35,13 @@ common common
                     , http-client
                     , http-client-tls
                     , http-types
+                    , network-uri
+                    , servant
+                    , servant-server
+                    , servant-client
+                    , servant-github-webhook
+                    , stm
+                    , warp
 
 library
     import: common
