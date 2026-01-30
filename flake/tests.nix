@@ -15,7 +15,6 @@
         nodes = {
           hydra = {...}: {
             imports = [
-              parts.config.flake.nixosModules.github-hydra-bridge
               parts.config.flake.nixosModules.hydra-github-bridge
             ];
 
@@ -32,15 +31,6 @@
                 useSubstitutes = false;
               };
 
-              github-hydra-bridge = {
-                enable = true;
-                hydraHost = "http://localhost:3000";
-                hydraUser = "bridge";
-                hydraPassFile = pkgs.writeText "hydra-pass-file" "hydra";
-                ghSecretFile = pkgs.writeText "gh-secret-file" "secret-token";
-                port = 8080;
-              };
-
               hydra-github-bridge.all = {
                 enable = true;
                 ghAppId = 12345;
@@ -52,7 +42,11 @@
                   {nativeBuildInputs = [pkgs.openssl];}
                   "openssl genrsa -out $out";
                 ghTokenFile = pkgs.writeText "gh-secret-file" "secret-token";
+                ghSecretFile = pkgs.writeText "gh-secret-file" "secret-token";
                 hydraHost = "http://localhost:3000";
+                hydraUser = "bridge";
+                hydraPassFile = pkgs.writeText "hydra-pass-file" "hydra";
+                port = 8080;
                 environmentFile = pkgs.writeText "env" ''
                   GITHUB_ENDPOINT_URL=http://localhost:4010
                 '';
@@ -100,14 +94,15 @@
                   wantedBy = ["multi-user.target"];
                   serviceConfig.ExecStart = "${config.packages.mockoon-cli}/bin/mockoon-cli start --data ${../mock-github-data.json} --port 4010 --repair";
                 };
-              }
-              // lib.genAttrs ["github-hydra-bridge" "hydra-github-bridge-all"] (name: {
-                # These will fail until Hydra and Mock GitHub are running, so we'll start
-                # them manually
-                wantedBy = lib.mkForce [];
-                # We'll want the test to fail if they crash
-                serviceConfig.Restart = lib.mkForce "no";
-              });
+
+                hydra-github-bridge-all = {
+                  # These will fail until Hydra and Mock GitHub are running, so we'll start
+                  # them manually
+                  wantedBy = lib.mkForce [];
+                  # We'll want the test to fail if they crash
+                  serviceConfig.Restart = lib.mkForce "no";
+                };
+              };
           };
         };
 
@@ -125,10 +120,6 @@
           # Start hydra-github-bridge
           hydra.systemctl("start hydra-github-bridge-all.service")
           hydra.wait_for_unit("hydra-github-bridge-all.service")
-
-          # Start github-hydra-bridge
-          hydra.systemctl("start github-hydra-bridge.service")
-          hydra.wait_for_unit("github-hydra-bridge.service")
           hydra.wait_for_open_port(8080, timeout=15)
         '';
       });
