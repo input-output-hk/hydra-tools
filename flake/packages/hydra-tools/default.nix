@@ -37,7 +37,7 @@
               inputsFrom = [config.treefmt.build.devShell];
 
               buildInputs = [
-                (withSystem system ({ config, ...}: config.packages.mockoon-cli))
+                (withSystem system ({config, ...}: config.packages.mockoon-cli))
               ];
             };
           };
@@ -59,9 +59,11 @@ in {
 
   flake.hydraJobs = lib.genAttrs config.systems (lib.flip withSystem (
     {pkgs, ...} @ ctx: let
-      jobs = (haskellPkgSet ctx).flake'.hydraJobs // {
+      jobs =
+        (haskellPkgSet ctx).flake'.hydraJobs
+        // {
           inherit (ctx.config) packages checks devShells;
-      };
+        };
     in
       jobs
       // {

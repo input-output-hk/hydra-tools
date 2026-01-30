@@ -10,9 +10,10 @@ module Main where
 
 import Control.Concurrent.Async as Async
 import Control.Monad
+import Data.ByteString.Char8 (ByteString)
 import Data.ByteString.Char8 qualified as BS
-import Data.IORef (newIORef, IORef)
-import qualified Data.ByteString.Char8 as C8
+import Data.ByteString.Char8 qualified as C8
+import Data.IORef (IORef, newIORef)
 import Data.List (find)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
@@ -20,8 +21,10 @@ import Data.Text qualified as Text
 import Data.Text.IO qualified as Text
 import Data.Time.Clock (NominalDiffTime)
 import Database.PostgreSQL.Simple
+import Lib (HydraClientEnv (..), app, gitHubKey, hydraClient, hydraClientEnv)
 import Lib.Bridge (notificationWatcher, statusHandlers)
 import Lib.GitHub qualified as GitHub
+import Network.Wai.Handler.Warp (run)
 import System.Environment (getEnv, lookupEnv)
 import System.IO
   ( BufferMode (LineBuffering),
@@ -30,10 +33,6 @@ import System.IO
     stdin,
     stdout,
   )
-import Data.ByteString.Char8 (ByteString)
-import Lib (hydraClient, hydraClientEnv, app, gitHubKey)
-import Lib (HydraClientEnv(..))
-import Network.Wai.Handler.Warp (run)
 
 fetchGitHubTokens :: Int -> FilePath -> Text -> BS.ByteString -> IO [(String, GitHub.TokenLease)]
 fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent = do
@@ -49,7 +48,7 @@ fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent = do
     return (Text.unpack owner, lease)
 
 getValidGitHubToken ::
-  IORef [(String, GitHub.TokenLease)] -> 
+  IORef [(String, GitHub.TokenLease)] ->
   Text ->
   ByteString ->
   IO [(String, GitHub.TokenLease)]
@@ -104,8 +103,8 @@ main = do
       ( Async.race
           ( Async.replicateConcurrently_
               numWorkers
-              ( withConnect 
-                  (ConnectInfo db 5432 db_user db_pass "hydra") 
+              ( withConnect
+                  (ConnectInfo db 5432 db_user db_pass "hydra")
                   (statusHandlers ghEndpointUrl ghUserAgent getValidGitHubToken')
               )
           )
@@ -129,7 +128,7 @@ main = do
         (const . putStrLn $ "withConnect exited")
     )
     ( either
-        (const . putStrLn $ "hydraClient exited") 
+        (const . putStrLn $ "hydraClient exited")
         (const . putStrLn $ "app exited")
     )
     eres

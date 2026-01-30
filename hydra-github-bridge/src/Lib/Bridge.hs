@@ -35,6 +35,7 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Data.Aeson hiding (Error, Success)
 import Data.Aeson qualified as Aeson
+import Data.ByteString.Char8 (ByteString)
 import Data.ByteString.Char8 qualified as BS
 import Data.ByteString.Lazy qualified as BSLw
 import Data.Duration (oneSecond)
@@ -85,7 +86,6 @@ import System.IO.Error
     isDoesNotExistErrorType,
   )
 import Text.Regex.TDFA ((=~))
-import Data.ByteString.Char8 (ByteString)
 
 -- Text utils
 tshow :: (Show a) => a -> Text
@@ -118,11 +118,11 @@ notificationWatcher host stateDir conn = do
           execute_ conn "NOTIFY github_status"
       )
 
-statusHandlers :: 
-  Text -> 
-  ByteString -> 
-  IO [(String, GitHub.TokenLease)] -> 
-  Connection -> 
+statusHandlers ::
+  Text ->
+  ByteString ->
+  IO [(String, GitHub.TokenLease)] ->
+  Connection ->
   IO ()
 statusHandlers ghEndpointUrl ghUserAgent getValidGitHubToken conn = forever $ do
   let processStatuses = withTransaction conn $ do

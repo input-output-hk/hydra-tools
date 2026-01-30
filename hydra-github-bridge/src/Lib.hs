@@ -14,9 +14,6 @@
 
 module Lib where
 
-import Data.Void (absurd)
-import qualified Lib.GitHub as GitHub
-import qualified Lib.Hydra as Hydra
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (newTVarIO)
 import Control.Monad (forM_, forever, void)
@@ -29,6 +26,7 @@ import Data.Char (isNumber)
 import Data.Maybe (fromJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Void (absurd)
 import Database.PostgreSQL.Simple
   ( Connection,
     Only (..),
@@ -57,7 +55,9 @@ import GitHub.Data.Webhooks.Payload
     HookUser (..),
     PullRequestTarget (..),
   )
+import qualified Lib.GitHub as GitHub
 import Lib.Hydra
+import qualified Lib.Hydra as Hydra
 import Network.HTTP.Client (newManager)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (Status (..))
@@ -508,10 +508,10 @@ hydraClientEnv :: Text -> Text -> Text -> IO HydraClientEnv
 hydraClientEnv host user pass = do
   mgr <- newManager tlsManagerSettings
   jar <- newTVarIO mempty
-  
+
   -- Parse host string
   let hostStr = Text.unpack host
-  hydraUrl <- 
+  hydraUrl <-
     case parseURI hostStr of
       -- It's a valid URI, use servant's parser
       Just _ -> parseBaseUrl hostStr
