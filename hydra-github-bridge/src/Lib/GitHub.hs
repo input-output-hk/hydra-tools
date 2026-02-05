@@ -8,9 +8,7 @@
 
 module Lib.GitHub
   ( module Lib.GitHub.Client,
-    CheckRun(..),
     parseGitHubFlakeURI,
-    TokenLease (..),
     fetchInstallations,
     fetchAppInstallationToken,
     getValidToken,
@@ -49,8 +47,6 @@ import GitHub.REST
   )
 import GitHub.REST.Auth (getJWTToken)
 
--- TODO[sgillespie]: The rest of these seem to have business logic, so we'll figure it out
--- later
 parseGitHubFlakeURI :: Text -> Maybe (Text, Text, Text)
 parseGitHubFlakeURI uri
   | "github:" `Text.isPrefixOf` uri =
