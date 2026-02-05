@@ -12,28 +12,43 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Lib where
+module Lib
+  ( module Lib.GitHub.WebHookServer,
+    module Lib.Hydra.DB,
+    module Lib.Hydra.Client,
+    toCheckRunConclusion,
+    binarySearch,
+    binarySearchM,
+    parseMergeQueueRef,
+    pushHook,
+    pullRequestHook,
+    escapeHydraName,
+    splitRepo,
+    issueCommentHook,
+    checkSuiteHook,
+    checkRunHook,
+    singleEndpoint,
+    on404,
+    handleCmd,
+    hydraClientEnv,
+    reAuthenticate,
+    isAuthError,
+    hydraClient,
+    app,
+  )
+where
 
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.STM (newTVarIO)
 import Control.Monad (forM_, forever, void)
 import Control.Monad.Error.Class (catchError)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (fromJSON)
 import qualified Data.Aeson as Aeson
-import Data.ByteString.Char8 (ByteString)
 import Data.Char (isNumber)
 import Data.Maybe (fromJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Void (absurd)
-import Database.PostgreSQL.Simple
-  ( Connection,
-    Only (..),
-    execute,
-    query_,
-  )
-import GHC.Generics
+import Database.PostgreSQL.Simple (Connection)
 import GitHub.Data.Webhooks.Events
   ( CheckRunEvent (..),
     CheckRunEventAction (..),
@@ -56,7 +71,9 @@ import GitHub.Data.Webhooks.Payload
     PullRequestTarget (..),
   )
 import qualified Lib.GitHub as GitHub
-import Lib.Hydra
+import Lib.GitHub.WebHookServer
+import Lib.Hydra.Client
+import Lib.Hydra.DB
 import qualified Lib.Hydra as Hydra
 import Network.HTTP.Client (newManager)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
@@ -64,14 +81,10 @@ import Network.HTTP.Types.Status (Status (..))
 import Network.URI (parseURI)
 import Servant
 import Servant.Client
-import Servant.GitHub.Webhook
-  ( GitHubEvent,
-    GitHubSignedReqBody,
-    RepoWebhookEvent (..),
-  )
-import qualified Servant.GitHub.Webhook as SGH
+import Servant.GitHub.Webhook (RepoWebhookEvent (..))
 import System.Exit (die)
 import Text.Read (readMaybe)
+import Control.Concurrent.STM (newTVarIO)
 
 toCheckRunConclusion :: Hydra.BuildStatus -> GitHub.CheckRunConclusion
 toCheckRunConclusion = \case
@@ -102,54 +115,6 @@ binarySearchM low high find = do
         then binarySearchM (mid + 1) high find
         else binarySearchM low mid find
 
-newtype GitHubKey = GitHubKey (forall result. SGH.GitHubKey result)
-
--- The following table exists in the database
---
--- CREATE TABLE IF NOT EXISTS github_commands (
---     id SERIAL PRIMARY KEY,
---     command JSONB NOT NULL,
---     created TIMESTAMP DEFAULT NOW(),
---     processed TIMESTAMP DEFAULT NULL
--- );
-data Command
-  = UpdateJobset Text Text Text HydraJobset -- only update it, never create
-  | CreateOrUpdateJobset Text Text Text HydraJobset -- create or update.
-  | DeleteJobset Text Text
-  | EvaluateJobset Text Text Bool
-  | RestartBuild Int
-  deriving (Eq, Generic, Read, Show)
-
-instance Aeson.ToJSON Command
-
-instance Aeson.FromJSON Command
-
-readCommand :: Connection -> IO Command
-readCommand conn = do
-  query_ conn "SELECT id, command FROM github_commands WHERE processed IS NULL ORDER BY created LIMIT 1" >>= \case
-    [] -> threadDelay 10_000_000 >> readCommand conn -- 10 sec
-    [(_id, cmd)] -> do
-      void $ execute conn "UPDATE github_commands SET processed = NOW() WHERE id = ?" (Only _id :: Only Int)
-      case (Aeson.fromJSON cmd) of
-        Aeson.Error e -> error $ show cmd ++ " readCommand: " ++ e
-        Aeson.Success x -> return x
-    x -> error $ "readCommand: " ++ show x
-
-writeCommand :: Connection -> Command -> IO ()
-writeCommand conn cmd = do
-  void $ execute conn "INSERT INTO github_commands (command) VALUES (?)" (Only (Aeson.toJSON cmd))
-
-gitHubKey :: ByteString -> GitHubKey
-gitHubKey k = GitHubKey (SGH.gitHubKey $ pure k)
-
-instance HasContextEntry '[GitHubKey] (SGH.GitHubKey result) where
-  getContextEntry (GitHubKey x :. _) = x
-
--- Push Hook
-type PushHookAPI =
-  GitHubEvent '[ 'WebhookPushEvent]
-    :> GitHubSignedReqBody '[JSON] PushEvent
-    :> Post '[JSON] ()
 
 parseMergeQueueRef :: Text -> Maybe (Text, Int)
 parseMergeQueueRef ref = do
@@ -221,12 +186,6 @@ pushHook conn _ (_, PushEvent {evPushRef = ref, evPushHeadSha = Just headSha, ev
 pushHook _conn _ (_, ev) = liftIO $ do
   putStrLn $ (show . whUserLogin . fromJust . evPushSender) ev ++ " pushed a commit causing HEAD SHA to become:"
   print $ (fromJust . evPushHeadSha) ev
-
--- PullRequest Hook
-type PullRequestHookAPI =
-  GitHubEvent '[ 'WebhookPullRequestEvent]
-    :> GitHubSignedReqBody '[JSON] PullRequestEvent
-    :> Post '[JSON] ()
 
 pullRequestHook :: Connection -> RepoWebhookEvent -> ((), PullRequestEvent) -> Handler ()
 pullRequestHook
@@ -348,22 +307,10 @@ splitRepo repo =
     (org : proj : _) -> (org, proj)
     _ -> error $ "Lib.splitrepo on " ++ Text.unpack repo
 
--- Issue Comment Hook
-type IssueCommentHookAPI =
-  GitHubEvent '[ 'WebhookIssueCommentEvent]
-    :> GitHubSignedReqBody '[JSON] IssueCommentEvent
-    :> Post '[JSON] ()
-
 issueCommentHook :: RepoWebhookEvent -> ((), IssueCommentEvent) -> Handler ()
 issueCommentHook _ (_, ev) = liftIO $ do
   putStrLn "An issue comment was posted:"
   print $ (whIssueCommentBody . evIssueCommentPayload) ev
-
--- Check Suite Hook
-type CheckSuiteHookAPI =
-  GitHubEvent '[ 'WebhookCheckSuiteEvent]
-    :> GitHubSignedReqBody '[JSON] CheckSuiteEvent
-    :> Post '[JSON] ()
 
 checkSuiteHook :: ClientEnv -> Connection -> RepoWebhookEvent -> ((), CheckSuiteEvent) -> Handler ()
 checkSuiteHook env conn _ (_, ev@CheckSuiteEvent {evCheckSuiteAction = CheckSuiteEventActionRerequested}) = liftIO $ do
@@ -388,12 +335,6 @@ checkSuiteHook env conn _ (_, ev@CheckSuiteEvent {evCheckSuiteAction = CheckSuit
           { hjFlake = "github:" <> repoName <> "/" <> whChecksPullRequestTargetSha (whChecksPullRequestHead pr)
           }
 checkSuiteHook _ _ _ (_, ev) = liftIO . putStrLn $ "Unhandled checkSuiteEvent with action: " ++ show (evCheckSuiteAction ev) ++ "; payload: " ++ show ev
-
--- Check Run Hook
-type CheckRunHookAPI =
-  GitHubEvent '[ 'WebhookCheckRunEvent]
-    :> GitHubSignedReqBody '[JSON] CheckRunEvent
-    :> Post '[JSON] ()
 
 checkRunHook :: Connection -> RepoWebhookEvent -> ((), CheckRunEvent) -> Handler ()
 checkRunHook conn _ (_, ev@CheckRunEvent {evCheckRunAction = CheckRunEventActionRerequested}) = liftIO $ do
@@ -423,8 +364,6 @@ checkRunHook _ _ (_, ev) =
       ++ show (whCheckRunName (evCheckRunCheckRun ev))
       ++ ": "
       ++ show (whCheckRunStatus (evCheckRunCheckRun ev))
-
-type SingleHookEndpointAPI = "hook" :> (PushHookAPI :<|> IssueCommentHookAPI :<|> PullRequestHookAPI :<|> CheckSuiteHookAPI :<|> CheckRunHookAPI)
 
 singleEndpoint :: ClientEnv -> Connection -> Server SingleHookEndpointAPI
 singleEndpoint env conn =
@@ -495,14 +434,6 @@ handleCmd _ (RestartBuild bid) = do
   liftIO (putStrLn $ "Processing Restart " ++ show bid ++ " from the queue. Triggering restart...")
   void $ restartBuild $ bid
   return ()
-
--- Hydra client environment that includes credentials for re-authentication
-data HydraClientEnv = HydraClientEnv
-  { hceHost :: Text,
-    hceUser :: Text,
-    hcePass :: Text,
-    hceClientEnv :: ClientEnv
-  }
 
 hydraClientEnv :: Text -> Text -> Text -> IO HydraClientEnv
 hydraClientEnv host user pass = do
