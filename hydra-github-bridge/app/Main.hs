@@ -12,9 +12,7 @@ module Main where
 import Control.Concurrent.Async as Async
 import Control.Monad
 import Data.ByteString.Char8 (ByteString)
-import Data.ByteString.Char8 qualified as BS
 import Data.ByteString.Char8 qualified as C8
-import Data.Functor (($>))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.String.Conversions (cs)
@@ -36,7 +34,7 @@ import System.IO
     stdout,
   )
 
-fetchGitHubTokens :: Int -> FilePath -> Text -> BS.ByteString -> IO [(String, TokenLease)]
+fetchGitHubTokens :: Int -> FilePath -> Text -> ByteString -> IO [(String, TokenLease)]
 fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent = do
   putStrLn "Fetching GitHub App installations..."
   ghAppInstalls <- fetchInstallations ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent
