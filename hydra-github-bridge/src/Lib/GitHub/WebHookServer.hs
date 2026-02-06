@@ -1,9 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Lib.GitHub.WebHookServer
   ( PushHookAPI,
@@ -16,6 +16,7 @@ module Lib.GitHub.WebHookServer
   )
 where
 
+import Data.ByteString.Char8 (ByteString)
 import GitHub.Data.Webhooks.Events
   ( CheckRunEvent,
     CheckSuiteEvent,
@@ -23,10 +24,9 @@ import GitHub.Data.Webhooks.Events
     PullRequestEvent,
     PushEvent,
   )
-import Servant (JSON, Post, (:<|>), (:>), HasContextEntry (..), Context (..))
+import Servant (Context (..), HasContextEntry (..), JSON, Post, (:<|>), (:>))
 import Servant.GitHub.Webhook (GitHubEvent, GitHubSignedReqBody, RepoWebhookEvent (..))
 import qualified Servant.GitHub.Webhook as GitHub
-import Data.ByteString.Char8 (ByteString)
 
 -- Push Hook
 type PushHookAPI =

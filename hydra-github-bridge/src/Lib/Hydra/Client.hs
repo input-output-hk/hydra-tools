@@ -37,9 +37,9 @@ import Data.Aeson.Casing (aesonDrop, camelCase)
 import Data.Aeson.Types (Value)
 import Data.Text (Text)
 import GHC.Generics (Generic)
+import Network.HTTP.Types (Status (..))
 import Servant
-import Servant.Client (ClientM, client, ClientEnv, ClientError (..), ResponseF (..))
-import Network.HTTP.Types (Status(..))
+import Servant.Client (ClientEnv, ClientError (..), ClientM, ResponseF (..), client)
 
 -- Hydra client environment that includes credentials for re-authentication
 data HydraClientEnv = HydraClientEnv
@@ -295,4 +295,3 @@ mkProject
 isAuthError :: ClientError -> Bool
 isAuthError (FailureResponse _ (Response {responseStatusCode = Status {statusCode = 403}})) = True
 isAuthError _ = False
-

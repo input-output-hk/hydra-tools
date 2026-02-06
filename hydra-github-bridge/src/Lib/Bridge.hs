@@ -4,5 +4,5 @@ module Lib.Bridge
   )
 where
 
-import Lib.Bridge.HydraToGitHub
 import Lib.Bridge.GitHubToHydra
+import Lib.Bridge.HydraToGitHub

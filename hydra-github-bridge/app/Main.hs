@@ -120,15 +120,11 @@ main = do
             (ConnectInfo db 5432 db_user db_pass "hydra")
             (statusHandlers ghEndpointUrl ghUserAgent getValidGitHubToken')
         ),
-
       withConnect (ConnectInfo db 5432 db_user db_pass "hydra") $ \conn ->
-          hydraClient env conn,
-
+        hydraClient env conn,
       withConnect
-          (ConnectInfo db 5432 db_user db_pass "hydra")
-          (notificationWatcher host stateDir),
-
+        (ConnectInfo db 5432 db_user db_pass "hydra")
+        (notificationWatcher host stateDir),
       withConnect (ConnectInfo db 5432 db_user db_pass "hydra") $ \conn -> do
-          run port (app (hceClientEnv env) conn (gitHubKey ghKey))
+        run port (app (hceClientEnv env) conn (gitHubKey ghKey))
     ]
-

@@ -4,5 +4,5 @@ module Lib.GitHub
   )
 where
 
-import Lib.GitHub.Client 
+import Lib.GitHub.Client
 import Lib.GitHub.WebHookServer

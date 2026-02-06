@@ -1,11 +1,11 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# LANGUAGE LambdaCase #-}
 
 module Lib.Bridge.HydraToGitHub
   ( statusHandler,
@@ -66,7 +66,9 @@ import Lib (binarySearch)
 import Lib.Data.Duration (humanReadableDuration)
 import Lib.Data.List (takeEnd)
 import Lib.Data.Text (indentLine)
+import Lib.GitHub (CheckRunConclusion)
 import Lib.GitHub qualified as GitHub
+import Lib.Hydra (BuildStatus)
 import Lib.Hydra qualified as Hydra
 import Network.HTTP.Client qualified as HTTP
 import System.FilePath
@@ -80,8 +82,6 @@ import System.IO.Error
     isDoesNotExistErrorType,
   )
 import Text.Regex.TDFA ((=~))
-import Lib.GitHub (CheckRunConclusion)
-import Lib.Hydra (BuildStatus)
 
 -- Text utils
 tshow :: (Show a) => a -> Text

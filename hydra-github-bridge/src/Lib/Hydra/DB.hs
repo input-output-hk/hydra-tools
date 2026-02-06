@@ -7,18 +7,18 @@
 module Lib.Hydra.DB
   ( Command (..),
     readCommand,
-    writeCommand
+    writeCommand,
   )
 where
 
+import Control.Concurrent (threadDelay)
+import Control.Monad (void)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Aeson qualified as Aeson
 import Data.Text (Text)
-import Database.PostgreSQL.Simple (Connection, Only (..), query_, execute)
+import Database.PostgreSQL.Simple (Connection, Only (..), execute, query_)
 import GHC.Generics (Generic)
 import Lib.Hydra.Client (HydraJobset)
-import Control.Concurrent (threadDelay)
-import Control.Monad (void)
 
 -- The following table exists in the database
 --

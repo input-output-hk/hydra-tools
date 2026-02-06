@@ -39,11 +39,12 @@ import Data.Aeson.Casing (aesonDrop, camelCase)
 import Data.Aeson.Types (ToJSON (..))
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LByteString
+import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Time (UTCTime)
-import Data.Time.Format.ISO8601 (iso8601Show, iso8601ParseM)
+import Data.Time.Format.ISO8601 (iso8601ParseM, iso8601Show)
 import Data.X509 (PrivKey (..))
 import Data.X509.File (readKeyFile)
 import GHC.Generics (Generic)
@@ -52,7 +53,9 @@ import GitHub.REST
     GitHubSettings (..),
     KeyValue (..),
     MonadGitHubREST (..),
-    Token (..), (.:), StdMethod (..),
+    StdMethod (..),
+    Token (..),
+    (.:),
   )
 import GitHub.REST.Auth (fromToken, getJWTToken)
 import GitHub.REST.Endpoint (endpointPath, renderMethod)
@@ -62,7 +65,6 @@ import Network.HTTP.Client (Manager)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (hAccept, hAuthorization, hUserAgent)
-import Data.String.Conversions (cs)
 
 -- | A simple monad that can run GitHub Rest API requests. This is similar to @GitHubT@,
 -- except that we allow overriding the GitHub API URL. This allows us to test locally
@@ -397,4 +399,3 @@ fetchAppInstallationToken ghEndpointUrl appId appKeyFile ghUserAgent appInstalla
       { token = BearerToken $ cs (response .: "token" :: String),
         expiry = Just expiry
       }
-
