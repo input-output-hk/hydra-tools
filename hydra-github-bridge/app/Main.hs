@@ -4,8 +4,8 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Main where
 
@@ -20,11 +20,11 @@ import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as Text
-import Data.Time.Clock (NominalDiffTime, getCurrentTime, addUTCTime)
+import Data.Time.Clock (NominalDiffTime, addUTCTime, getCurrentTime)
 import Database.PostgreSQL.Simple
-import Lib (HydraClientEnv (..), app, gitHubKey, hydraClient, hydraClientEnv)
-import Lib.Bridge (notificationWatcher, statusHandlers)
-import Lib.GitHub qualified as GitHub
+import Lib.Bridge (notificationWatcher, statusHandlers, hydraClientEnv, hydraClient, app)
+import Lib.GitHub (TokenLease (..), fetchAppInstallationToken, fetchInstallations, gitHubKey)
+import Lib.Hydra (HydraClientEnv (..))
 import Network.Wai.Handler.Warp (run)
 import System.Environment (getEnv, lookupEnv)
 import System.IO
@@ -34,26 +34,25 @@ import System.IO
     stdin,
     stdout,
   )
-import Lib.GitHub.Client (TokenLease)
 
-fetchGitHubTokens :: Int -> FilePath -> Text -> BS.ByteString -> IO [(String, GitHub.TokenLease)]
+fetchGitHubTokens :: Int -> FilePath -> Text -> BS.ByteString -> IO [(String, TokenLease)]
 fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent = do
   putStrLn "Fetching GitHub App installations..."
-  ghAppInstalls <- GitHub.fetchInstallations ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent
+  ghAppInstalls <- fetchInstallations ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent
   putStrLn $ "Found " <> show (length ghAppInstalls) <> " installations"
   forM_ ghAppInstalls $ \(owner, installId) -> do
     Text.putStrLn $ "\t- " <> owner <> " (" <> Text.pack (show installId) <> ")"
 
   forM ghAppInstalls $ \(owner, installId) -> do
-    lease <- GitHub.fetchAppInstallationToken ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent installId
+    lease <- fetchAppInstallationToken ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent installId
     Text.putStrLn $ "Fetched new GitHub App installation token valid for " <> owner <> " until " <> Text.pack (show lease.expiry)
     return (Text.unpack owner, lease)
 
 getValidGitHubToken ::
-  IORef [(String, GitHub.TokenLease)] ->
+  IORef [(String, TokenLease)] ->
   Text ->
   ByteString ->
-  IO [(String, GitHub.TokenLease)]
+  IO [(String, TokenLease)]
 getValidGitHubToken ghTokens ghEndpointUrl ghUserAgent =
   let buffer = 5 :: NominalDiffTime
    in getValidToken buffer ghTokens $ \owner -> do
@@ -64,7 +63,7 @@ getValidGitHubToken ghTokens ghEndpointUrl ghUserAgent =
         ghAppKeyFile <- getEnv "GITHUB_APP_KEY_FILE"
         maybe
           (error $ "No configured GitHub App Installation ID " <> owner)
-          (GitHub.fetchAppInstallationToken ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent)
+          (fetchAppInstallationToken ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent)
           ghAppInstallId
 
 getValidToken :: NominalDiffTime -> IORef [(String, TokenLease)] -> (String -> IO TokenLease) -> IO [(String, TokenLease)]
@@ -73,7 +72,7 @@ getValidToken buffer lease fetch = do
   now <- getCurrentTime
   leases'' <- forM leases' $ \(owner, tok) -> do
     case tok.expiry of
-      Just expiry | addUTCTime buffer now < expiry -> return (owner, tok)
+      Just expiry' | addUTCTime buffer now < expiry' -> return (owner, tok)
       _ -> (owner,) <$> fetch owner
   writeIORef lease leases''
   return leases''

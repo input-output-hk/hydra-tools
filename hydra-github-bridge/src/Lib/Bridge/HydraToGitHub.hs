@@ -5,6 +5,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Lib.Bridge.HydraToGitHub
   ( statusHandler,
@@ -61,10 +62,7 @@ import GitHub.REST
     StdMethod (POST),
     queryGitHub,
   )
-import Lib
-  ( binarySearch,
-    toCheckRunConclusion,
-  )
+import Lib (binarySearch)
 import Lib.Data.Duration (humanReadableDuration)
 import Lib.Data.List (takeEnd)
 import Lib.Data.Text (indentLine)
@@ -82,6 +80,8 @@ import System.IO.Error
     isDoesNotExistErrorType,
   )
 import Text.Regex.TDFA ((=~))
+import Lib.GitHub (CheckRunConclusion)
+import Lib.Hydra (BuildStatus)
 
 -- Text utils
 tshow :: (Show a) => a -> Text
@@ -750,3 +750,17 @@ statusHandler ghEndpointUrl ghUserAgent getGitHubToken checkRun = do
           ghData = GitHub.toKeyValue checkRun.payload
         } ::
     IO (Either SomeException Value)
+
+toCheckRunConclusion :: BuildStatus -> CheckRunConclusion
+toCheckRunConclusion = \case
+  Hydra.Succeeded -> GitHub.Success
+  Hydra.Failed -> GitHub.Failure
+  Hydra.DependencyFailed -> GitHub.Failure
+  Hydra.Aborted -> GitHub.Cancelled
+  Hydra.Cancelled -> GitHub.Cancelled
+  Hydra.FailedWithOutput -> GitHub.Failure
+  Hydra.TimedOut -> GitHub.TimedOut
+  Hydra.LogLimitExceeded -> GitHub.Failure
+  Hydra.OutputSizeLimitExceeded -> GitHub.Failure
+  Hydra.NonDeterministicBuild -> GitHub.Failure
+  Hydra.Other -> GitHub.Failure
