@@ -53,56 +53,55 @@
               };
             };
 
-            systemd.services =
-              {
-                hydra-init.postStart = ''
-                  # Create a Hydra user for the bridge
+            systemd.services = {
+              hydra-init.postStart = ''
+                # Create a Hydra user for the bridge
 
-                  # Run required SQL migration
-                  # TODO: It would be better if this were in the application startup logic
-                  ${pkgs.postgresql}/bin/psql hydra hydra <<EOF
-                    CREATE TABLE IF NOT EXISTS github_commands (
-                        id SERIAL PRIMARY KEY,
-                        command JSONB NOT NULL,
-                        created TIMESTAMP DEFAULT NOW(),
-                        processed TIMESTAMP DEFAULT NULL
-                    );
+                # Run required SQL migration
+                # TODO: It would be better if this were in the application startup logic
+                ${pkgs.postgresql}/bin/psql hydra hydra <<EOF
+                  CREATE TABLE IF NOT EXISTS github_commands (
+                      id SERIAL PRIMARY KEY,
+                      command JSONB NOT NULL,
+                      created TIMESTAMP DEFAULT NOW(),
+                      processed TIMESTAMP DEFAULT NULL
+                  );
 
-                    CREATE TABLE github_status (
-                        id SERIAL PRIMARY KEY,
-                        owner TEXT NOT NULL,
-                        repo TEXT NOT NULL,
-                        headSha TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        UNIQUE (owner, repo, headSha, name)
-                    );
+                  CREATE TABLE github_status (
+                      id SERIAL PRIMARY KEY,
+                      owner TEXT NOT NULL,
+                      repo TEXT NOT NULL,
+                      headSha TEXT NOT NULL,
+                      name TEXT NOT NULL,
+                      UNIQUE (owner, repo, headSha, name)
+                  );
 
-                    CREATE TABLE github_status_payload (
-                        id SERIAL PRIMARY KEY,
-                        status_id INTEGER NOT NULL,
-                        payload JSONB NOT NULL,
-                        created TIMESTAMP DEFAULT NOW(),
-                        sent TIMESTAMP DEFAULT NULL,
-                        tries INTEGER DEFAULT 0,
-                        FOREIGN KEY (status_id) REFERENCES github_status (id) ON DELETE CASCADE
-                    );
-                  EOF
-                '';
+                  CREATE TABLE github_status_payload (
+                      id SERIAL PRIMARY KEY,
+                      status_id INTEGER NOT NULL,
+                      payload JSONB NOT NULL,
+                      created TIMESTAMP DEFAULT NOW(),
+                      sent TIMESTAMP DEFAULT NULL,
+                      tries INTEGER DEFAULT 0,
+                      FOREIGN KEY (status_id) REFERENCES github_status (id) ON DELETE CASCADE
+                  );
+                EOF
+              '';
 
-                # Start the mock server
-                mock-github = {
-                  wantedBy = ["multi-user.target"];
-                  serviceConfig.ExecStart = "${config.packages.mockoon-cli}/bin/mockoon-cli start --data ${../mock-github-data.json} --port 4010 --repair";
-                };
-
-                hydra-github-bridge-all = {
-                  # These will fail until Hydra and Mock GitHub are running, so we'll start
-                  # them manually
-                  wantedBy = lib.mkForce [];
-                  # We'll want the test to fail if they crash
-                  serviceConfig.Restart = lib.mkForce "no";
-                };
+              # Start the mock server
+              mock-github = {
+                wantedBy = ["multi-user.target"];
+                serviceConfig.ExecStart = "${config.packages.mockoon-cli}/bin/mockoon-cli start --data ${../mock-github-data.json} --port 4010 --repair";
               };
+
+              hydra-github-bridge-all = {
+                # These will fail until Hydra and Mock GitHub are running, so we'll start
+                # them manually
+                wantedBy = lib.mkForce [];
+                # We'll want the test to fail if they crash
+                serviceConfig.Restart = lib.mkForce "no";
+              };
+            };
           };
         };
 
