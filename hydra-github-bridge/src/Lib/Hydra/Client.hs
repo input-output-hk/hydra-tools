@@ -28,6 +28,7 @@ module Lib.Hydra.Client
     login,
     push,
     restartBuild,
+    isAuthError,
   )
 where
 
@@ -37,7 +38,8 @@ import Data.Aeson.Types (Value)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Servant
-import Servant.Client (ClientM, client, ClientEnv)
+import Servant.Client (ClientM, client, ClientEnv, ClientError (..), ResponseF (..))
+import Network.HTTP.Types (Status(..))
 
 -- Hydra client environment that includes credentials for re-authentication
 data HydraClientEnv = HydraClientEnv
@@ -288,3 +290,9 @@ mkProject
   :<|> login
   :<|> push
   :<|> restartBuild = client (Proxy @HydraAPI)
+
+-- Check if error is due to authentication failure (403 Forbidden)
+isAuthError :: ClientError -> Bool
+isAuthError (FailureResponse _ (Response {responseStatusCode = Status {statusCode = 403}})) = True
+isAuthError _ = False
+

@@ -5,6 +5,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TupleSections #-}
 
 module Main where
 
@@ -13,13 +14,13 @@ import Control.Monad
 import Data.ByteString.Char8 (ByteString)
 import Data.ByteString.Char8 qualified as BS
 import Data.ByteString.Char8 qualified as C8
-import Data.IORef (IORef, newIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.IO qualified as Text
-import Data.Time.Clock (NominalDiffTime)
+import Data.Time.Clock (NominalDiffTime, getCurrentTime, addUTCTime)
 import Database.PostgreSQL.Simple
 import Lib (HydraClientEnv (..), app, gitHubKey, hydraClient, hydraClientEnv)
 import Lib.Bridge (notificationWatcher, statusHandlers)
@@ -33,6 +34,7 @@ import System.IO
     stdin,
     stdout,
   )
+import Lib.GitHub.Client (TokenLease)
 
 fetchGitHubTokens :: Int -> FilePath -> Text -> BS.ByteString -> IO [(String, GitHub.TokenLease)]
 fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent = do
@@ -54,7 +56,7 @@ getValidGitHubToken ::
   IO [(String, GitHub.TokenLease)]
 getValidGitHubToken ghTokens ghEndpointUrl ghUserAgent =
   let buffer = 5 :: NominalDiffTime
-   in GitHub.getValidToken buffer ghTokens $ \owner -> do
+   in getValidToken buffer ghTokens $ \owner -> do
         putStrLn $ "GitHub token expired or will expire within the next " <> show buffer <> ", fetching a new one..."
         ghAppId <- getEnv "GITHUB_APP_ID" >>= return . read
         ghAppInstallIds <- getEnv "GITHUB_APP_INSTALL_IDS" >>= return . read @[(String, Int)]
@@ -64,6 +66,17 @@ getValidGitHubToken ghTokens ghEndpointUrl ghUserAgent =
           (error $ "No configured GitHub App Installation ID " <> owner)
           (GitHub.fetchAppInstallationToken ghEndpointUrl ghAppId ghAppKeyFile ghUserAgent)
           ghAppInstallId
+
+getValidToken :: NominalDiffTime -> IORef [(String, TokenLease)] -> (String -> IO TokenLease) -> IO [(String, TokenLease)]
+getValidToken buffer lease fetch = do
+  leases' <- readIORef lease
+  now <- getCurrentTime
+  leases'' <- forM leases' $ \(owner, tok) -> do
+    case tok.expiry of
+      Just expiry | addUTCTime buffer now < expiry -> return (owner, tok)
+      _ -> (owner,) <$> fetch owner
+  writeIORef lease leases''
+  return leases''
 
 main :: IO ()
 main = do

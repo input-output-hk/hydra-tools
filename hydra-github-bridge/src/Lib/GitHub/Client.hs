@@ -23,6 +23,8 @@ module Lib.GitHub.Client
     gitHubRestConfig,
     gitHubApiVersion,
     loadSigner,
+    fetchInstallations,
+    fetchAppInstallationToken,
   )
 where
 
@@ -31,7 +33,7 @@ import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT (..))
 import Control.Monad.Trans (MonadTrans)
 import Crypto.PubKey.RSA (PrivateKey)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Casing (aesonDrop, camelCase)
 import Data.Aeson.Types (ToJSON (..))
@@ -41,7 +43,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Time (UTCTime)
-import Data.Time.Format.ISO8601 (iso8601Show)
+import Data.Time.Format.ISO8601 (iso8601Show, iso8601ParseM)
 import Data.X509 (PrivKey (..))
 import Data.X509.File (readKeyFile)
 import GHC.Generics (Generic)
@@ -50,9 +52,9 @@ import GitHub.REST
     GitHubSettings (..),
     KeyValue (..),
     MonadGitHubREST (..),
-    Token,
+    Token (..), (.:), StdMethod (..),
   )
-import GitHub.REST.Auth (fromToken)
+import GitHub.REST.Auth (fromToken, getJWTToken)
 import GitHub.REST.Endpoint (endpointPath, renderMethod)
 import GitHub.REST.KeyValue (kvToValue)
 import GitHub.REST.PageLinks (PageLinks, parsePageLinks)
@@ -60,6 +62,7 @@ import Network.HTTP.Client (Manager)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (hAccept, hAuthorization, hUserAgent)
+import Data.String.Conversions (cs)
 
 -- | A simple monad that can run GitHub Rest API requests. This is similar to @GitHubT@,
 -- except that we allow overriding the GitHub API URL. This allows us to test locally
@@ -329,3 +332,69 @@ loadSigner file = do
   case keys of
     [PrivKeyRSA pk] -> pure pk
     _ -> fail $ "Not a valid RSA private key file: " <> file
+
+fetchInstallations :: Text -> Int -> FilePath -> ByteString -> IO [(Text, Int)]
+fetchInstallations ghEndpointUrl appId appKeyFile ghUserAgent = do
+  signer <- loadSigner appKeyFile
+  jwt <- getJWTToken signer appId
+
+  let githubSettings =
+        GitHubSettings
+          { token = Just jwt,
+            userAgent = ghUserAgent,
+            apiVersion = gitHubApiVersion
+          }
+  response <-
+    liftIO $
+      runGitHubRestT githubSettings ghEndpointUrl $
+        queryGitHub
+          GHEndpoint
+            { method = GET,
+              endpoint = "/app/installations",
+              endpointVals = [],
+              ghData = []
+            }
+
+  return $
+    map
+      ( \inst ->
+          let account = inst .: "account" :: Value
+           in (account .: "login", inst .: "id")
+      )
+      response
+
+fetchAppInstallationToken :: Text -> Int -> FilePath -> ByteString -> Int -> IO TokenLease
+fetchAppInstallationToken ghEndpointUrl appId appKeyFile ghUserAgent appInstallationId = do
+  signer <- loadSigner appKeyFile
+  jwt <- getJWTToken signer appId
+
+  let githubSettings =
+        GitHubSettings
+          { token = Just jwt,
+            userAgent = ghUserAgent,
+            apiVersion = gitHubApiVersion
+          }
+  response <-
+    liftIO $
+      runGitHubRestT githubSettings ghEndpointUrl $
+        queryGitHub
+          GHEndpoint
+            { method = POST,
+              endpoint = "/app/installations/:appInstallId/access_tokens",
+              endpointVals = ["appInstallId" := appInstallationId],
+              ghData =
+                [ "permissions"
+                    := [ "checks" := ("write" :: String),
+                         "statuses" := ("write" :: String)
+                       ]
+                ]
+            }
+
+  expiry <- iso8601ParseM (response .: "expires_at" :: String)
+
+  return $
+    TokenLease
+      { token = BearerToken $ cs (response .: "token" :: String),
+        expiry = Just expiry
+      }
+

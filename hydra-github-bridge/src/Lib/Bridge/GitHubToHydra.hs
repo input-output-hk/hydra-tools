@@ -1,6 +1,6 @@
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Lib.Bridge.GitHubToHydra
   ( hydraClientEnv,
@@ -21,7 +21,9 @@ module Lib.Bridge.GitHubToHydra
   )
 where
 
+import Control.Concurrent.STM (newTVarIO)
 import Control.Monad (forM_, forever, void)
+import Control.Monad.Except (MonadError (..))
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson qualified as Aeson
 import Data.Char (isNumber)
@@ -32,21 +34,19 @@ import Data.Text qualified as Text
 import Database.PostgreSQL.Simple (Connection)
 import GitHub.Data.Webhooks.Events (CheckRunEvent (..), CheckRunEventAction (..), CheckSuiteEvent (..), CheckSuiteEventAction (..), IssueCommentEvent (..), PullRequestEvent (..), PullRequestEventAction (..), PushEvent (..))
 import GitHub.Data.Webhooks.Payload (HookCheckRun (..), HookCheckSuite (..), HookChecksPullRequest (..), HookChecksPullRequestTarget (..), HookIssueComment (..), HookPullRequest (..), HookRepository (..), HookUser (..), PullRequestTarget (..))
-import Lib.GitHub.WebHookServer (GitHubKey, SingleHookEndpointAPI)
-import Lib.Hydra.Client (HydraJobset (..), defHydraFlakeJobset, getJobset, HydraClientEnv (..), HydraProject (..), push, mkJobset, mkProject, defHydraProject, rmJobset, restartBuild, login, HydraLogin (..), isAuthError)
-import Lib.Hydra.DB (Command (..), writeCommand, readCommand)
+import Lib.GitHub (GitHubKey, SingleHookEndpointAPI)
+import Lib.Hydra (Command, HydraClientEnv)
+import Lib.Hydra qualified as Hydra
+import Network.HTTP.Client (newManager)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
+import Network.HTTP.Types (Status (..))
+import Network.URI (parseURI)
 import Servant (Application, Context (..), Handler, Server, (:<|>) (..))
-import Servant.Client (ClientEnv (..), runClientM, ClientM, ClientError (..), ResponseF (..), mkClientEnv, parseBaseUrl, BaseUrl (..), Scheme (..), showBaseUrl)
+import Servant.Client (BaseUrl (..), ClientEnv (..), ClientError (..), ClientM, ResponseF (..), Scheme (..), mkClientEnv, parseBaseUrl, runClientM, showBaseUrl)
 import Servant.GitHub.Webhook (RepoWebhookEvent)
 import Servant.Server (serveWithContext)
 import System.Exit (die)
 import Text.Read (readMaybe)
-import Network.HTTP.Types (Status(..))
-import Control.Monad.Except (MonadError(..))
-import Network.URI (parseURI)
-import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Network.HTTP.Client (newManager)
-import Control.Concurrent.STM (newTVarIO)
 
 app :: ClientEnv -> Connection -> GitHubKey -> Application
 app env conn key =
@@ -73,29 +73,29 @@ pushHook conn _ (_, PushEvent {evPushRef = ref, evPushHeadSha = Just headSha, ev
             jobsetName = "merge-queue-" <> Text.pack (show pullReqNumber)
 
         let jobset =
-              defHydraFlakeJobset
-                { hjName = "merge-queue-" <> Text.pack (show pullReqNumber),
-                  hjDescription = "Merge Queue: PR" <> Text.pack (show pullReqNumber) <> " -> " <> targetBranch,
-                  hjFlake = "github:" <> repoName <> "/" <> headSha,
+              Hydra.defHydraFlakeJobset
+                { Hydra.hjName = "merge-queue-" <> Text.pack (show pullReqNumber),
+                  Hydra.hjDescription = "Merge Queue: PR" <> Text.pack (show pullReqNumber) <> " -> " <> targetBranch,
+                  Hydra.hjFlake = "github:" <> repoName <> "/" <> headSha,
                   -- setting visiblity seems to have no effect...
-                  hjVisible = False,
+                  Hydra.hjVisible = False,
                   -- ... so we just disable it.
-                  hjEnabled = 0
+                  Hydra.hjEnabled = 0
                 }
         -- We Update the Jobset instead of Delete, so that past build results will
         -- still be available.  This should update the sha to 000000, and as such
         -- allow us to find them and delete them later.
         do
           putStrLn $ "Adding Update " ++ show projName ++ "/" ++ show jobsetName ++ " to the queue."
-          writeCommand conn (UpdateJobset repoName projName jobsetName jobset)
+          Hydra.writeCommand conn (Hydra.UpdateJobset repoName projName jobsetName jobset)
   | "refs/heads/gh-readonly-queue/" `Text.isPrefixOf` ref,
     Just (targetBranch, pullReqNumber) <- parseMergeQueueRef ref =
       liftIO $ do
         let jobset =
-              defHydraFlakeJobset
-                { hjName = "merge-queue-" <> Text.pack (show pullReqNumber),
-                  hjDescription = "Merge Queue: PR" <> Text.pack (show pullReqNumber) <> " -> " <> targetBranch,
-                  hjFlake = "github:" <> repoName <> "/" <> headSha
+              Hydra.defHydraFlakeJobset
+                { Hydra.hjName = "merge-queue-" <> Text.pack (show pullReqNumber),
+                  Hydra.hjDescription = "Merge Queue: PR" <> Text.pack (show pullReqNumber) <> " -> " <> targetBranch,
+                  Hydra.hjFlake = "github:" <> repoName <> "/" <> headSha
                 }
 
             projName = escapeHydraName repoName
@@ -103,7 +103,7 @@ pushHook conn _ (_, PushEvent {evPushRef = ref, evPushHeadSha = Just headSha, ev
 
         do
           putStrLn $ "Adding Create/Update " ++ show projName ++ "/" ++ show jobsetName ++ " to the queue."
-          writeCommand conn (CreateOrUpdateJobset repoName projName jobsetName jobset)
+          Hydra.writeCommand conn (Hydra.CreateOrUpdateJobset repoName projName jobsetName jobset)
   | ref `elem` ["refs/heads/" <> x | x <- ["main", "master", "develop"]]
       || any (`Text.isPrefixOf` ref) ["refs/" <> x <> "/" | x <- ["tags", "heads/release", "heads/ci"]] =
       liftIO $ do
@@ -111,15 +111,15 @@ pushHook conn _ (_, PushEvent {evPushRef = ref, evPushHeadSha = Just headSha, ev
             refName = maybe (Text.drop (Text.length "refs/tags/") ref) id $ Text.stripPrefix "refs/heads/" ref
             jobsetName = escapeHydraName refName
             jobset =
-              defHydraFlakeJobset
-                { hjName = jobsetName,
-                  hjDescription = refName <> " " <> if "refs/heads/" `Text.isPrefixOf` ref then "branch" else "tag",
-                  hjFlake = "github:" <> repoName <> "/" <> headSha
+              Hydra.defHydraFlakeJobset
+                { Hydra.hjName = jobsetName,
+                  Hydra.hjDescription = refName <> " " <> if "refs/heads/" `Text.isPrefixOf` ref then "branch" else "tag",
+                  Hydra.hjFlake = "github:" <> repoName <> "/" <> headSha
                 }
 
         do
           putStrLn $ "Adding Create/Update " ++ show projName ++ "/" ++ show jobsetName ++ " to the queue."
-          writeCommand conn (CreateOrUpdateJobset repoName projName jobsetName jobset)
+          Hydra.writeCommand conn (Hydra.CreateOrUpdateJobset repoName projName jobsetName jobset)
 pushHook _conn _ (_, ev) = liftIO $ do
   putStrLn $ (show . whUserLogin . fromJust . evPushSender) ev ++ " pushed a commit causing HEAD SHA to become:"
   print $ (fromJust . evPushHeadSha) ev
@@ -208,10 +208,10 @@ pullRequestHook
           --  flake = "github:${info.head.repo.owner.login}/${info.head.repo.name}/${info.head.ref}";
           --
           let jobset =
-                defHydraFlakeJobset
-                  { hjName = "pullrequest-" <> Text.pack (show (evPullReqNumber ev)),
-                    hjDescription = "PR " <> Text.pack (show (evPullReqNumber ev)) <> ": " <> whPullReqTitle (evPullReqPayload ev),
-                    hjFlake =
+                Hydra.defHydraFlakeJobset
+                  { Hydra.hjName = "pullrequest-" <> Text.pack (show (evPullReqNumber ev)),
+                    Hydra.hjDescription = "PR " <> Text.pack (show (evPullReqNumber ev)) <> ": " <> whPullReqTitle (evPullReqPayload ev),
+                    Hydra.hjFlake =
                       "github:"
                         <> repoName
                         <> "/"
@@ -223,25 +223,25 @@ pullRequestHook
 
           liftIO $ do
             putStrLn $ "Adding Create/Update " ++ show projName ++ "/" ++ show jobsetName ++ " to the queue."
-            writeCommand conn (CreateOrUpdateJobset repoName projName jobsetName jobset)
+            Hydra.writeCommand conn (Hydra.CreateOrUpdateJobset repoName projName jobsetName jobset)
 pullRequestHook conn _ (_, ev@PullRequestEvent {evPullReqAction = PullRequestClosedAction}) = liftIO $ do
   let repoName = whRepoFullName (evPullReqRepo ev)
       projName = escapeHydraName repoName
       jobsetName = "pullrequest-" <> Text.pack (show (evPullReqNumber ev))
 
   let jobset =
-        defHydraFlakeJobset
-          { hjName = "pullrequest-" <> Text.pack (show (evPullReqNumber ev)),
-            hjDescription = "PR " <> Text.pack (show (evPullReqNumber ev)) <> ": " <> whPullReqTitle (evPullReqPayload ev),
-            hjFlake =
+        Hydra.defHydraFlakeJobset
+          { Hydra.hjName = "pullrequest-" <> Text.pack (show (evPullReqNumber ev)),
+            Hydra.hjDescription = "PR " <> Text.pack (show (evPullReqNumber ev)) <> ": " <> whPullReqTitle (evPullReqPayload ev),
+            Hydra.hjFlake =
               "github:"
                 <> repoName
                 <> "/"
                 <> whPullReqTargetSha (whPullReqHead (evPullReqPayload ev)),
             -- setting visiblity seems to have no effect...
-            hjVisible = False,
+            Hydra.hjVisible = False,
             -- ... so we just disable it.
-            hjEnabled = 0
+            Hydra.hjEnabled = 0
           }
 
   -- We Update the Jobset instead of Delete, so that past build results will
@@ -249,7 +249,7 @@ pullRequestHook conn _ (_, ev@PullRequestEvent {evPullReqAction = PullRequestClo
   -- allow us to find them and delete them later.
   liftIO $ do
     putStrLn $ "Adding Update " ++ show projName ++ "/" ++ show jobsetName ++ " to the queue."
-    writeCommand conn (UpdateJobset repoName projName jobsetName jobset)
+    Hydra.writeCommand conn (Hydra.UpdateJobset repoName projName jobsetName jobset)
 pullRequestHook _ _ (_, ev) =
   liftIO (putStrLn $ "Unhandled pullRequestEvent with action: " ++ show (evPullReqAction ev))
 
@@ -263,17 +263,17 @@ checkSuiteHook env conn _ (_, ev@CheckSuiteEvent {evCheckSuiteAction = CheckSuit
     let jobsetName = "pullrequest-" <> Text.pack (show $ whChecksPullRequestNumber pr)
 
     jobset <-
-      (flip runClientM env $ getJobset projName jobsetName)
+      (flip runClientM env $ Hydra.getJobset projName jobsetName)
         >>= either (die . show) return
         >>= \response -> case Aeson.fromJSON response of
           Aeson.Error e -> die $ show e
           Aeson.Success v -> return v
 
     putStrLn $ "Adding Update " ++ show projName ++ "/" ++ show jobsetName ++ " to the queue."
-    writeCommand conn $
-      UpdateJobset repoName projName jobsetName $
+    Hydra.writeCommand conn $
+      Hydra.UpdateJobset repoName projName jobsetName $
         jobset
-          { hjFlake = "github:" <> repoName <> "/" <> whChecksPullRequestTargetSha (whChecksPullRequestHead pr)
+          { Hydra.hjFlake = "github:" <> repoName <> "/" <> whChecksPullRequestTargetSha (whChecksPullRequestHead pr)
           }
 checkSuiteHook _ _ _ (_, ev) = liftIO . putStrLn $ "Unhandled checkSuiteEvent with action: " ++ show (evCheckSuiteAction ev) ++ "; payload: " ++ show ev
 
@@ -290,11 +290,11 @@ checkRunHook conn _ (_, ev@CheckRunEvent {evCheckRunAction = CheckRunEventAction
       let jobsetName = "pullrequest-" <> Text.pack (show $ whChecksPullRequestNumber pr)
 
       putStrLn $ "Adding Eval " ++ show projName ++ "/" ++ show jobsetName ++ " to the queue."
-      writeCommand conn $ EvaluateJobset projName jobsetName True
+      Hydra.writeCommand conn $ Hydra.EvaluateJobset projName jobsetName True
     else do
       let externalId = read . Text.unpack $ whCheckRunExternalId checkRun
       putStrLn $ "Adding Restart " ++ Text.unpack checkRunName ++ " #" ++ show externalId ++ " to the queue."
-      writeCommand conn $ RestartBuild externalId
+      Hydra.writeCommand conn $ Hydra.RestartBuild externalId
 checkRunHook _ _ (_, ev) =
   liftIO . putStrLn $
     "Unhandled checkRunEvent with action: "
@@ -328,20 +328,20 @@ hydraClientEnv host user pass = do
       host' = Text.pack (showBaseUrl hydraUrl)
 
   -- login first
-  runClientM (login (Just host') (HydraLogin user pass)) env >>= \case
+  runClientM (Hydra.login (Just host') (Hydra.HydraLogin user pass)) env >>= \case
     Left e -> die (show e)
     Right _ -> pure ()
 
-  return $ HydraClientEnv host user pass env
+  return $ Hydra.HydraClientEnv host user pass env
 
 hydraClient :: HydraClientEnv -> Connection -> IO ()
-hydraClient henv@(HydraClientEnv host _ _ env) conn =
+hydraClient henv@(Hydra.HydraClientEnv host _ _ env) conn =
   -- loop forever, working down the hydra commands
   forever $
-    readCommand conn >>= \cmd -> do
+    Hydra.readCommand conn >>= \cmd -> do
       result <- runClientM (handleCmd host cmd) env
       case result of
-        Left e | isAuthError e -> do
+        Left e | Hydra.isAuthError e -> do
           putStrLn "Authentication error detected, re-authenticating..."
           reAuthenticate henv >>= \case
             Left authErr -> putStrLn authErr
@@ -354,58 +354,58 @@ hydraClient henv@(HydraClientEnv host _ _ env) conn =
         Right _ -> pure ()
 
 handleCmd :: Text -> Command -> ClientM ()
-handleCmd host (CreateOrUpdateJobset repoName projName jobsetName jobset) = do
+handleCmd host (Hydra.CreateOrUpdateJobset repoName projName jobsetName jobset) = do
   liftIO (putStrLn $ "Processing Create/Update " ++ show projName ++ "/" ++ show jobsetName ++ " from the queue.")
   void $
-    mkJobset projName jobsetName jobset `on404` do
+    Hydra.mkJobset projName jobsetName jobset `on404` do
       let proj = snd $ splitRepo repoName
       void $
-        mkProject
+        Hydra.mkProject
           projName
-          ( defHydraProject
-              { hpName = projName,
-                hpDisplayname = proj,
-                hpHomepage = "https://github.com/" <> repoName
+          ( Hydra.defHydraProject
+              { Hydra.hpName = projName,
+                Hydra.hpDisplayname = proj,
+                Hydra.hpHomepage = "https://github.com/" <> repoName
               }
           )
-      mkJobset projName jobsetName jobset
+      Hydra.mkJobset projName jobsetName jobset
 
   liftIO (putStrLn $ "Processing Update " ++ show projName ++ "/" ++ show jobsetName ++ " triggering push...")
-  void $ push (Just host) (Just (projName <> ":" <> jobsetName)) Nothing
+  void $ Hydra.push (Just host) (Just (projName <> ":" <> jobsetName)) Nothing
   return ()
-handleCmd host (UpdateJobset repoName projName jobsetName jobset) = do
+handleCmd host (Hydra.UpdateJobset repoName projName jobsetName jobset) = do
   liftIO (putStrLn $ "Processing Update " ++ show projName ++ "/" ++ show jobsetName ++ " from the queue.")
   -- ensure we try to get this first, ...
-  void $ getJobset projName jobsetName
+  void $ Hydra.getJobset projName jobsetName
   -- if get fails, no point in making one.
   void $
-    mkJobset projName jobsetName jobset `on404` do
+    Hydra.mkJobset projName jobsetName jobset `on404` do
       let proj = snd $ splitRepo repoName
       void $
-        mkProject
+        Hydra.mkProject
           projName
-          ( defHydraProject
-              { hpName = projName,
-                hpDisplayname = proj,
-                hpHomepage = "https://github.com/" <> repoName
+          ( Hydra.defHydraProject
+              { Hydra.hpName = projName,
+                Hydra.hpDisplayname = proj,
+                Hydra.hpHomepage = "https://github.com/" <> repoName
               }
           )
-      mkJobset projName jobsetName jobset
+      Hydra.mkJobset projName jobsetName jobset
 
   -- or triggering an eval
   liftIO (putStrLn $ "Processing Update " ++ show projName ++ "/" ++ show jobsetName ++ " triggering push...")
-  void $ push (Just host) (Just (projName <> ":" <> jobsetName)) Nothing
+  void $ Hydra.push (Just host) (Just (projName <> ":" <> jobsetName)) Nothing
   return ()
-handleCmd _ (DeleteJobset projName jobsetName) = do
-  void $ rmJobset projName jobsetName
+handleCmd _ (Hydra.DeleteJobset projName jobsetName) = do
+  void $ Hydra.rmJobset projName jobsetName
   return ()
-handleCmd host (EvaluateJobset projName jobsetName force) = do
+handleCmd host (Hydra.EvaluateJobset projName jobsetName force) = do
   liftIO (putStrLn $ "Processing Eval " ++ show projName ++ "/" ++ show jobsetName ++ " from the queue. Triggering push...")
-  void $ push (Just host) (Just (projName <> ":" <> jobsetName)) (Just force)
+  void $ Hydra.push (Just host) (Just (projName <> ":" <> jobsetName)) (Just force)
   return ()
-handleCmd _ (RestartBuild bid) = do
+handleCmd _ (Hydra.RestartBuild bid) = do
   liftIO (putStrLn $ "Processing Restart " ++ show bid ++ " from the queue. Triggering restart...")
-  void $ restartBuild $ bid
+  void $ Hydra.restartBuild $ bid
   return ()
 
 -- combinator for handing 404 (not found)
@@ -423,8 +423,8 @@ splitRepo repo =
 
 -- Re-authenticate with Hydra when session expires
 reAuthenticate :: HydraClientEnv -> IO (Either String ())
-reAuthenticate (HydraClientEnv host user pass env) = do
-  result <- runClientM (login (Just host) (HydraLogin user pass)) env
+reAuthenticate (Hydra.HydraClientEnv host user pass env) = do
+  result <- runClientM (Hydra.login (Just host) (Hydra.HydraLogin user pass)) env
   case result of
     Left e -> return $ Left ("Re-authentication failed: " ++ show e)
     Right _ -> return $ Right ()
