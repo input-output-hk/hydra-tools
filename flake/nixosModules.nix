@@ -124,102 +124,106 @@
                 '';
               };
 
-              waitForHydraServerPort = mkEnableOption ''
-                delay of hydra-server started state until its port is ready.
-                Note this adds an ExecStartPost= to hydra-server.
-                It does not make the hydra-github-bridge wait as the same might suggest.
-              '' // {
-                default = true;
-              };
+              waitForHydraServerPort =
+                mkEnableOption ''
+                  delay of hydra-server started state until its port is ready.
+                  Note this adds an ExecStartPost= to hydra-server.
+                  It does not make the hydra-github-bridge wait as the same might suggest.
+                ''
+                // {
+                  default = true;
+                };
             };
           });
         };
 
       config.systemd = lib.mkIf (cfg != {}) {
-        services = lib.flip lib.mapAttrs' cfg (
-          name: iCfg:
-            lib.nameValuePair "hydra-github-bridge-${name}" {
-              inherit (iCfg) enable;
+        services =
+          lib.flip lib.mapAttrs' cfg (
+            name: iCfg:
+              lib.nameValuePair "hydra-github-bridge-${name}" {
+                inherit (iCfg) enable;
 
-              wantedBy = ["hydra-github-bridge.target"];
-              after = ["postgresql.service"] ++ config.systemd.targets.hydra-github-bridge.after;
-              partOf = ["hydra-github-bridge.target"];
+                wantedBy = ["hydra-github-bridge.target"];
+                after = ["postgresql.service"] ++ config.systemd.targets.hydra-github-bridge.after;
+                partOf = ["hydra-github-bridge.target"];
 
-              startLimitIntervalSec = 0;
+                startLimitIntervalSec = 0;
 
-              serviceConfig =
-                {
-                  User = config.users.users.hydra.name;
-                  Group = config.users.groups.hydra.name;
+                serviceConfig =
+                  {
+                    User = config.users.users.hydra.name;
+                    Group = config.users.groups.hydra.name;
 
-                  Restart = "always";
-                  RestartSec = "10s";
+                    Restart = "always";
+                    RestartSec = "10s";
 
-                  LoadCredential =
-                    lib.optional (iCfg.ghTokenFile != null) "github-token:${iCfg.ghTokenFile}"
-                    ++ lib.optional (iCfg.ghAppKeyFile != null) "github-app-key-file:${iCfg.ghAppKeyFile}"
-                    ++ lib.optional (iCfg.hydraPassFile != null) "hydra-pass:${iCfg.hydraPassFile}"
-                    ++ lib.optional (iCfg.ghSecretFile != null) "github-secret:${iCfg.ghSecretFile}";
+                    LoadCredential =
+                      lib.optional (iCfg.ghTokenFile != null) "github-token:${iCfg.ghTokenFile}"
+                      ++ lib.optional (iCfg.ghAppKeyFile != null) "github-app-key-file:${iCfg.ghAppKeyFile}"
+                      ++ lib.optional (iCfg.hydraPassFile != null) "hydra-pass:${iCfg.hydraPassFile}"
+                      ++ lib.optional (iCfg.ghSecretFile != null) "github-secret:${iCfg.ghSecretFile}";
 
-                  StateDirectory = "hydra";
-                }
-                // lib.optionalAttrs (iCfg.environmentFile != null)
-                {EnvironmentFile = builtins.toPath iCfg.environmentFile;};
+                    StateDirectory = "hydra";
+                  }
+                  // lib.optionalAttrs (iCfg.environmentFile != null)
+                  {EnvironmentFile = builtins.toPath iCfg.environmentFile;};
 
-              environment =
-                {
-                  HYDRA_HOST = iCfg.hydraHost;
-                  HYDRA_DB = iCfg.hydraDb;
-                  PORT = toString iCfg.port;
-                }
-                // lib.optionalAttrs (iCfg.ghUserAgent != "") {
-                  GITHUB_USER_AGENT = iCfg.ghUserAgent;
-                }
-                // lib.optionalAttrs (iCfg.ghAppId != 0) {
-                  GITHUB_APP_ID = toString iCfg.ghAppId;
-                }
-                // lib.optionalAttrs (iCfg.ghAppInstallIds != {}) {
-                  GITHUB_APP_INSTALL_IDS = let
-                    mkPairStr = org: installId: "${org}=${builtins.toString installId}";
-                  in
-                    lib.pipe iCfg.ghAppInstallIds [
-                      (lib.mapAttrsToList mkPairStr)
-                      (lib.concatStringsSep ",")
-                    ];
-                }
-                // lib.optionalAttrs (iCfg.hydraUser != "") {
-                  HYDRA_USER = iCfg.hydraUser;
-                };
+                environment =
+                  {
+                    HYDRA_HOST = iCfg.hydraHost;
+                    HYDRA_DB = iCfg.hydraDb;
+                    PORT = toString iCfg.port;
+                  }
+                  // lib.optionalAttrs (iCfg.ghUserAgent != "") {
+                    GITHUB_USER_AGENT = iCfg.ghUserAgent;
+                  }
+                  // lib.optionalAttrs (iCfg.ghAppId != 0) {
+                    GITHUB_APP_ID = toString iCfg.ghAppId;
+                  }
+                  // lib.optionalAttrs (iCfg.ghAppInstallIds != {}) {
+                    GITHUB_APP_INSTALL_IDS = let
+                      mkPairStr = org: installId: "${org}=${builtins.toString installId}";
+                    in
+                      lib.pipe iCfg.ghAppInstallIds [
+                        (lib.mapAttrsToList mkPairStr)
+                        (lib.concatStringsSep ",")
+                      ];
+                  }
+                  // lib.optionalAttrs (iCfg.hydraUser != "") {
+                    HYDRA_USER = iCfg.hydraUser;
+                  };
 
-              script = ''
-                ${lib.optionalString (iCfg.ghTokenFile != null) ''export GITHUB_WEBHOOK_SECRET=$(< "$CREDENTIALS_DIRECTORY"/github-token)''}
-                ${lib.optionalString (iCfg.ghAppKeyFile != null) ''export GITHUB_APP_KEY_FILE="$CREDENTIALS_DIRECTORY"/github-app-key-file''}
-                ${lib.optionalString (iCfg.hydraPassFile != null) ''export HYDRA_PASS=$(< "$CREDENTIALS_DIRECTORY"/hydra-pass)''}
-                ${lib.optionalString (iCfg.ghSecretFile != null) ''export KEY=$(< "$CREDENTIALS_DIRECTORY"/github-secret)''}
+                script = ''
+                  ${lib.optionalString (iCfg.ghTokenFile != null) ''export GITHUB_WEBHOOK_SECRET=$(< "$CREDENTIALS_DIRECTORY"/github-token)''}
+                  ${lib.optionalString (iCfg.ghAppKeyFile != null) ''export GITHUB_APP_KEY_FILE="$CREDENTIALS_DIRECTORY"/github-app-key-file''}
+                  ${lib.optionalString (iCfg.hydraPassFile != null) ''export HYDRA_PASS=$(< "$CREDENTIALS_DIRECTORY"/hydra-pass)''}
+                  ${lib.optionalString (iCfg.ghSecretFile != null) ''export KEY=$(< "$CREDENTIALS_DIRECTORY"/github-secret)''}
 
-                export HYDRA_STATE_DIR="$STATE_DIRECTORY"
+                  export HYDRA_STATE_DIR="$STATE_DIRECTORY"
 
-                exec ${lib.getExe iCfg.package}
-              '';
-            }
-        ) // lib.optionalAttrs (lib.any (iCfg: iCfg.waitForHydraServerPort) (lib.attrValues cfg)) {
-          # Delay systemd's dependencies until Hydra actually listens.
-          # This is needed for After= ordering of the github-hydra-bridge
-          # because that tries to log in to use Hydra's API when it starts.
-          hydra-server.postStart = let
-            script = pkgs.writeShellApplication {
-              name = "hydra-wait-for-port";
-              runtimeInputs = [pkgs.netcat];
-              text = ''
-                while ! nc -z localhost ${toString config.services.hydra.port} 2> /dev/null; do
-                  sleep 1
-                done
-              '';
-            };
-          in ''
-            timeout 30 ${lib.getExe script}
-          '';
-        };
+                  exec ${lib.getExe iCfg.package}
+                '';
+              }
+          )
+          // lib.optionalAttrs (lib.any (iCfg: iCfg.waitForHydraServerPort) (lib.attrValues cfg)) {
+            # Delay systemd's dependencies until Hydra actually listens.
+            # This is needed for After= ordering of the github-hydra-bridge
+            # because that tries to log in to use Hydra's API when it starts.
+            hydra-server.postStart = let
+              script = pkgs.writeShellApplication {
+                name = "hydra-wait-for-port";
+                runtimeInputs = [pkgs.netcat];
+                text = ''
+                  while ! nc -z localhost ${toString config.services.hydra.port} 2> /dev/null; do
+                    sleep 1
+                  done
+                '';
+              };
+            in ''
+              timeout 30 ${lib.getExe script}
+            '';
+          };
 
         targets.hydra-github-bridge = rec {
           wantedBy = ["hydra-server.service"];
