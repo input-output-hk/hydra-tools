@@ -128,7 +128,7 @@
                 mkEnableOption ''
                   delay of hydra-server started state until its port is ready.
                   Note this adds an ExecStartPost= to hydra-server.
-                  It does not make the hydra-github-bridge wait as the same might suggest.
+                  It does not make the hydra-github-bridge wait as the name might suggest.
                 ''
                 // {
                   default = true;
