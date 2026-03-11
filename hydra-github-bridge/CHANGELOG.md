@@ -1,6 +1,11 @@
 # Revision history for hydra-github-bridge
 
-## 0.2.0.0
+## 0.2.1.0 (2026-03-10)
+
+ * Add a `waitForHydraServerPort` NixOS option that adds an ExecStartPost to hydra-server
+   so that it waits for the port to become ready.
+
+## 0.2.0.0 (2026-03-10)
 
  * Consolidate `github-hydra-bridge` and `hydra-github-bridge`
 

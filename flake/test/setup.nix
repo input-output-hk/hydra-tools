@@ -39,6 +39,7 @@
       hydraUser = "bridge";
       hydraPassFile = pkgs.writeText "hydra-pass-file" "hydra";
       port = 8811;
+      waitForHydraServerPort = true;
       environmentFile = pkgs.writeText "env" ''
         GITHUB_ENDPOINT_URL=http://localhost:4010
       '';

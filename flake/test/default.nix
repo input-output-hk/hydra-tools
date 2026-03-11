@@ -55,7 +55,6 @@
 
             # Wait for Hydra to start
             hydra.wait_for_unit("hydra-server.service")
-            hydra.wait_for_open_port(3000)
 
             # Create the bridge user and start the bridge
             hydra.succeed("hydra-create-user bridge --password hydra --role admin")
