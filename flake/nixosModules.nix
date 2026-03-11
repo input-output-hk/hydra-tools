@@ -108,6 +108,41 @@
                 '';
               };
 
+              checkRunPrefix = mkOption {
+                type = types.str;
+                default = "ci/hydra-build:";
+                description = ''
+                  Prefix for GitHub check-run names. Set to empty string to disable.
+                '';
+              };
+
+              filterJobs = mkOption {
+                type = types.bool;
+                default = true;
+                description = ''
+                  When true, only report required/nonrequired jobs and failures
+                  to GitHub. When false, report ALL jobs as check-runs.
+                '';
+              };
+
+              enableSse = mkOption {
+                type = types.bool;
+                default = true;
+                description = ''
+                  Enable the SSE (Server-Sent Events) endpoint for real-time
+                  build status streaming. Clients can connect to
+                  GET /status/:owner/:repo/:sha/events for live updates.
+                '';
+              };
+
+              ssePort = mkOption {
+                type = types.port;
+                default = 8812;
+                description = ''
+                  The port for the SSE status endpoint.
+                '';
+              };
+
               port = mkOption {
                 type = types.port;
                 default = 8811;
@@ -192,6 +227,12 @@
                   }
                   // lib.optionalAttrs (iCfg.hydraUser != "") {
                     HYDRA_USER = iCfg.hydraUser;
+                  }
+                  // {
+                    CHECK_RUN_PREFIX = iCfg.checkRunPrefix;
+                    FILTER_JOBS = lib.boolToString iCfg.filterJobs;
+                    SSE_ENABLED = lib.boolToString iCfg.enableSse;
+                    SSE_PORT = toString iCfg.ssePort;
                   };
 
                 script = ''
@@ -288,6 +329,9 @@
           wantedBy = ["multi-user.target"];
           after = ["postgresql.service"];
           partOf = ["hydra-server.service"]; # implies after (systemd/systemd#13847)
+
+          # nix is needed for the local store probe (nix path-info --offline).
+          path = [pkgs.nix];
 
           startLimitIntervalSec = 0;
 
