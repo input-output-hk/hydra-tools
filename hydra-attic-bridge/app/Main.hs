@@ -1,28 +1,17 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
 import Control.Concurrent
-import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Exception
   ( SomeException,
     catch,
     displayException,
   )
 import Control.Monad (forever, replicateM_, unless, void, when)
-import qualified Data.ByteString.Char8 as BS
-import qualified Data.ByteString.Lazy.Char8 as BSL
-import Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.Notification
-import GHC.Generics
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO
@@ -38,23 +27,65 @@ import System.Process
   )
 import Text.Read (readMaybe)
 
+-- | Maximum number of retries before permanently discarding an entry.
+-- At 1.5^20 * 5 min ≈ 16 hours for the last retry.  Entries beyond
+-- this threshold are dead weight that will never succeed (the store
+-- path was never fetched back from the remote builder, or the
+-- derivation is genuinely broken).
+maxRetries :: Int
+maxRetries = 20
+
+-- | Push a store path to attic.  On success the row is deleted;
+-- on failure an exponential backoff is applied.
+pushToAttic :: Connection -> String -> Int -> String -> IO Bool
+pushToAttic conn cache rowId drvPath = do
+  (exitCode, _, errOutput) <- readCreateProcessWithExitCode (shell $ "attic push " ++ cache ++ " " ++ drvPath) ""
+  case exitCode of
+    ExitFailure code -> do
+      putStrLn $ "Ran: attic push " ++ cache ++ " " ++ drvPath
+      putStrLn $ "Attic push failed with exit code " ++ show code
+      unless (null errOutput) $ putStrLn $ "Error output:\n" ++ errOutput
+      -- Exponential backoff: 5 min * 1.5^tries, capped at 30 days.
+      _ <- execute conn "UPDATE DrvpathsToUpload SET last = NOW() + (interval '5 minutes' * least(8640, 1.5 ^ tries)), tries = tries + 1 WHERE id = ?;" (Only rowId)
+      pure True
+    ExitSuccess -> do
+      _ <- execute conn "DELETE FROM DrvpathsToUpload WHERE id = ?;" (Only rowId)
+      pure True
+
 processDrvPath :: Connection -> String -> IO ()
 processDrvPath conn cache = do
   more <- withTransaction conn $ do
-    result <- query_ conn "SELECT drvpath FROM DrvpathsToUpload WHERE last < NOW() FOR UPDATE SKIP LOCKED LIMIT 1;"
+    -- Select by primary key so that DELETE/UPDATE below only touches
+    -- one row, eliminating deadlocks from duplicate drvpath entries.
+    result <- query conn
+      "SELECT id, drvpath FROM DrvpathsToUpload WHERE last < NOW() AND tries < ? FOR UPDATE SKIP LOCKED LIMIT 1;"
+      (Only maxRetries)
     case result of
-      [Only drvPath] -> do
-        (exitCode, _, errOutput) <- readCreateProcessWithExitCode (shell $ "attic push " ++ cache ++ " " ++ drvPath) ""
-        case exitCode of
-          ExitFailure code -> do
-            putStrLn $ "Ran: attic push " ++ cache ++ " " ++ drvPath
-            putStrLn $ "Attic push failed with exit code " ++ show code
-            unless (null errOutput) $ putStrLn $ "Error output:\n" ++ errOutput
-            execute conn "UPDATE DrvpathsToUpload SET last = NOW() + interval '5 minutes', tries = tries + 1 WHERE drvpath = ?;" (Only drvPath)
-            pure True
-          ExitSuccess -> do
-            execute conn "DELETE FROM DrvpathsToUpload WHERE drvpath = ?;" (Only drvPath)
-            pure True
+      [(rowId, drvPath) :: (Int, String)] -> do
+        -- Fast local check: is the store path already in our store?
+        -- Uses --offline to skip substituters for a quick probe.
+        (probeExit, _, _) <- readCreateProcessWithExitCode (shell $ "nix path-info --offline " ++ drvPath ++ " >/dev/null 2>&1") ""
+        case probeExit of
+          ExitFailure _ -> do
+            -- Path not in local store.  Try fetching from LAN peers
+            -- via peernix / configured substituters before giving up.
+            -- nix-store --realise checks all configured substituters
+            -- and downloads if found — it does NOT rebuild.
+            putStrLn $ "Path not local, fetching from peers: " ++ drvPath
+            (fetchExit, _, fetchErr) <- readCreateProcessWithExitCode (shell $ "nix-store --realise " ++ drvPath ++ " >/dev/null 2>&1") ""
+            case fetchExit of
+              ExitSuccess -> do
+                putStrLn $ "Fetched from peer: " ++ drvPath
+                pushToAttic conn cache rowId drvPath
+              ExitFailure _ -> do
+                -- Path truly unavailable anywhere on the network.
+                -- Use a longer backoff since these are unlikely to
+                -- appear soon (no point hammering every 2 minutes).
+                putStrLn $ "Path not available on any peer, deferring: " ++ drvPath
+                unless (null fetchErr) $ putStrLn $ "Fetch error: " ++ fetchErr
+                _ <- execute conn "UPDATE DrvpathsToUpload SET last = NOW() + interval '10 minutes', tries = tries + 1 WHERE id = ?;" (Only rowId)
+                pure True
+          ExitSuccess -> pushToAttic conn cache rowId drvPath
       _ -> pure False
   when more (processDrvPath conn cache)
 
@@ -67,7 +98,6 @@ workerLoop wakeChan connectInfo cache =
       catch (processDrvPath conn cache) $ \err ->
         putStrLn $ "Worker encountered an error: " ++ displayException (err :: SomeException)
 
--- main ()
 main :: IO ()
 main = do
   hSetBuffering stdin LineBuffering
@@ -84,7 +114,10 @@ main = do
   let workerCount =
         case workersEnv >>= readMaybe of
           Just n | n > 0 -> n
-          _ -> 1
+          -- Default to 4 workers: peer-fetch adds network I/O per item,
+          -- so parallelism helps keep throughput up while waiting on
+          -- nix-store --realise and attic push.
+          _ -> 4
 
   (exitCode, _, errOutput) <-
     readCreateProcessWithExitCode
