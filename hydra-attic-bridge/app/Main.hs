@@ -57,9 +57,11 @@ processDrvPath conn cache = do
   more <- withTransaction conn $ do
     -- Select by primary key so that DELETE/UPDATE below only touches
     -- one row, eliminating deadlocks from duplicate drvpath entries.
-    result <- query conn
-      "SELECT id, drvpath FROM DrvpathsToUpload WHERE last < NOW() AND tries < ? FOR UPDATE SKIP LOCKED LIMIT 1;"
-      (Only maxRetries)
+    result <-
+      query
+        conn
+        "SELECT id, drvpath FROM DrvpathsToUpload WHERE last < NOW() AND tries < ? FOR UPDATE SKIP LOCKED LIMIT 1;"
+        (Only maxRetries)
     case result of
       [(rowId, drvPath) :: (Int, String)] -> do
         -- Fast local check: is the store path already in our store?

@@ -79,6 +79,7 @@ import Lib.GitHub (CheckRunConclusion, TokenLease)
 import Lib.GitHub qualified as GitHub
 import Lib.Hydra (BuildStatus)
 import Lib.Hydra qualified as Hydra
+import Lib.SSE (StatusCache, broadcastCheckRuns)
 import Network.HTTP.Client qualified as HTTP
 import System.FilePath
   ( takeFileName,
@@ -91,7 +92,6 @@ import System.IO.Error
     isDoesNotExistErrorType,
   )
 import Text.Regex.TDFA ((=~))
-import Lib.SSE (StatusCache, broadcastCheckRuns)
 
 -- Text utils
 tshow :: (Show a) => a -> Text
