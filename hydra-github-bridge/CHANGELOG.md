@@ -1,5 +1,25 @@
 # Revision history for hydra-github-bridge
 
+## UNRELEASED (YYYY-MM-DD)
+
+ * Make check-run name prefix and job filtering configurable via environment variables 
+   and NixOS module options. The NixOS module accepts the following new options:
+
+    * checkRunPrefix
+    * filterJobs
+
+ * Add a Server-Sent Events HTTP server for streaming Hydra build status. This is enabled
+   by the new NixOS module options:
+
+    * enableSse
+    * ssePort
+
+ * Fix severe DB load caused by the worker dequeue query scanning the entire
+   `github_status_payload` table on every poll. Replaced with a query using
+   `NOT EXISTS` and a partial index, and added a periodic pruning thread to
+   discard superseded notifications.
+
+
 ## 0.2.1.0 (2026-03-10)
 
  * Add a `waitForHydraServerPort` NixOS option that adds an ExecStartPost to hydra-server
