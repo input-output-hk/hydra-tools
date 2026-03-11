@@ -17,6 +17,9 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Time (NominalDiffTime)
 import Database.PostgreSQL.Simple
+  ( ConnectInfo (..),
+    withConnect,
+  )
 import Lib.Bridge (app, hydraClient, hydraClientEnv, statusHandlers)
 import Lib.Bridge.GitHubToHydra (GitHubToHydraEnv (..), parseInstallIds)
 import Lib.Bridge.HydraToGitHub
@@ -28,7 +31,7 @@ import Lib.Bridge.HydraToGitHub
 import Lib.GitHub
   ( gitHubKey,
   )
-import Lib.Hydra (HydraClientEnv (..))
+import Lib.Hydra (HydraClientEnv (..), ensureIndexes, pruneStaleNotifications)
 import Lib.SSE (newStatusCache, runSSEServer)
 import Network.Wai.Handler.Warp (run)
 import System.Environment (getEnv, lookupEnv)
@@ -121,13 +124,7 @@ main = do
   -- dedicated connection with autocommit.
   withConnect (ConnectInfo db 5432 db_user db_pass "hydra") $ \migConn -> do
     putStrLn "Ensuring partial index idx_github_status_payload_unsent exists..."
-    _ <-
-      execute_
-        migConn
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS \
-        \idx_github_status_payload_unsent \
-        \ON github_status_payload (status_id, id DESC) \
-        \WHERE sent IS NULL AND tries < 5"
+    ensureIndexes migConn
     putStrLn "Index ready."
 
   Async.mapConcurrently_
@@ -155,23 +152,7 @@ main = do
         withConnect (ConnectInfo db 5432 db_user db_pass "hydra") $ \conn ->
           forever $ do
             threadDelay (5 * 60 * 1000000) -- 5 minutes
-            pruned <-
-              execute_
-                conn
-                "UPDATE github_status_payload SET sent = NOW() \
-                \WHERE id IN ( \
-                \  SELECT p.id \
-                \  FROM github_status_payload p \
-                \  JOIN github_status s ON s.id = p.status_id \
-                \  WHERE p.sent IS NULL AND p.tries < 5 \
-                \    AND EXISTS ( \
-                \      SELECT 1 \
-                \      FROM github_status_payload p2 \
-                \      JOIN github_status s2 ON s2.id = p2.status_id \
-                \      WHERE s2.owner = s.owner AND s2.repo = s.repo AND s2.name = s.name \
-                \        AND p2.sent IS NOT NULL AND p2.id > p.id \
-                \    ) \
-                \)"
+            pruned <- pruneStaleNotifications conn
             when (pruned > 0) $
               putStrLn $
                 "Pruned " ++ show pruned ++ " stale notification(s)"
