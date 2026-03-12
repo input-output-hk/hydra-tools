@@ -9,11 +9,7 @@
       cfg = config.services.hydra-github-bridge;
     in {
       options.services.hydra-github-bridge = with lib; {
-        enable =
-          mkEnableOption "hydra github bridge"
-          // {
-            default = true;
-          };
+        enable = mkEnableOption "hydra github bridge";
 
         package = mkOption {
           type = types.package;
@@ -24,7 +20,6 @@
 
         ghAppId = mkOption {
           type = types.int;
-          default = 0;
           description = ''
             The GitHub App ID to sign authentication JWTs with.
           '';
@@ -32,35 +27,16 @@
 
         ghAppInstallIds = mkOption {
           type = types.attrsOf types.int;
-          default = {};
           description = ''
             Mapping of organization names to GitHub App installation ids to
             authenticate with.
           '';
         };
 
-        ghUserAgent = mkOption {
-          type = types.str;
-          default = null;
-          description = ''
-            The user agent to use for authorization with the GitHub API.
-            This must match the app name if you authenticate using a GitHub App token.
-          '';
-        };
-
         ghAppKeyFile = mkOption {
           type = types.path;
-          default = "";
           description = ''
             Path to a file containing the GitHub App private key for authorization with GitHub.
-          '';
-        };
-
-        ghTokenFile = mkOption {
-          type = with types; nullOr path;
-          default = null;
-          description = ''
-            Path to a file containing the GitHub token for authorization with GitHub.
           '';
         };
 
@@ -69,6 +45,15 @@
           default = null;
           description = ''
             The agreed upon secret with GitHub for the Webhook payloads.
+          '';
+        };
+
+        ghUserAgent = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            The user agent to use for authorization with the GitHub API.
+            This must match the app name if you authenticate using a GitHub App token.
           '';
         };
 
@@ -133,87 +118,83 @@
       };
 
       config = lib.mkIf cfg.enable {
-        systemd.services = {
-          hydra-github-bridge = {
-            wantedBy = ["hydra-server.service"];
-            after = ["postgresql.service" "hydra-server.service"];
+        systemd.services =
+          {
+            hydra-github-bridge = {
+              wantedBy = ["hydra-server.service"];
+              after = ["postgresql.service" "hydra-server.service"];
 
-            startLimitIntervalSec = 0;
+              startLimitIntervalSec = 0;
 
-            serviceConfig =
-              {
-                User = config.users.users.hydra.name;
-                Group = config.users.groups.hydra.name;
+              serviceConfig =
+                {
+                  User = config.users.users.hydra.name;
+                  Group = config.users.groups.hydra.name;
 
-                Restart = "always";
-                RestartSec = "10s";
+                  Restart = "always";
+                  RestartSec = "10s";
 
-                LoadCredential =
-                  lib.optional (cfg.ghTokenFile != null) "github-token:${cfg.ghTokenFile}"
-                  ++ lib.optional (cfg.ghAppKeyFile != null) "github-app-key-file:${cfg.ghAppKeyFile}"
-                  ++ lib.optional (cfg.hydraPassFile != null) "hydra-pass:${cfg.hydraPassFile}"
-                  ++ lib.optional (cfg.ghSecretFile != null) "github-secret:${cfg.ghSecretFile}";
+                  LoadCredential =
+                    ["github-app-key-file:${cfg.ghAppKeyFile}"]
+                    ++ lib.optional (cfg.hydraPassFile != null) "hydra-pass:${cfg.hydraPassFile}"
+                    ++ lib.optional (cfg.ghSecretFile != null) "github-secret:${cfg.ghSecretFile}";
 
-                StateDirectory = "hydra";
-              }
-              // lib.optionalAttrs (cfg.environmentFile != null)
-              {EnvironmentFile = builtins.toPath cfg.environmentFile;};
+                  StateDirectory = "hydra";
+                }
+                // lib.optionalAttrs (cfg.environmentFile != null)
+                {EnvironmentFile = builtins.toPath cfg.environmentFile;};
 
-            environment =
-              {
-                HYDRA_HOST = cfg.hydraHost;
-                HYDRA_DB = cfg.hydraDb;
-                PORT = toString cfg.port;
-              }
-              // lib.optionalAttrs (cfg.ghUserAgent != "") {
-                GITHUB_USER_AGENT = cfg.ghUserAgent;
-              }
-              // lib.optionalAttrs (cfg.ghAppId != 0) {
-                GITHUB_APP_ID = toString cfg.ghAppId;
-              }
-              // lib.optionalAttrs (cfg.ghAppInstallIds != {}) {
-                GITHUB_APP_INSTALL_IDS = let
-                  mkPairStr = org: installId: "${org}=${builtins.toString installId}";
-                in
-                  lib.pipe cfg.ghAppInstallIds [
-                    (lib.mapAttrsToList mkPairStr)
-                    (lib.concatStringsSep ",")
-                  ];
-              }
-              // lib.optionalAttrs (cfg.hydraUser != "") {
-                HYDRA_USER = cfg.hydraUser;
-              };
+              environment =
+                {
+                  GITHUB_APP_ID = toString cfg.ghAppId;
+                  HYDRA_HOST = cfg.hydraHost;
+                  HYDRA_DB = cfg.hydraDb;
+                  PORT = toString cfg.port;
 
-            script = ''
-              ${lib.optionalString (cfg.ghTokenFile != null) ''export GITHUB_WEBHOOK_SECRET=$(< "$CREDENTIALS_DIRECTORY"/github-token)''}
-              ${lib.optionalString (cfg.ghAppKeyFile != null) ''export GITHUB_APP_KEY_FILE="$CREDENTIALS_DIRECTORY"/github-app-key-file''}
-              ${lib.optionalString (cfg.hydraPassFile != null) ''export HYDRA_PASS=$(< "$CREDENTIALS_DIRECTORY"/hydra-pass)''}
-              ${lib.optionalString (cfg.ghSecretFile != null) ''export KEY=$(< "$CREDENTIALS_DIRECTORY"/github-secret)''}
+                  GITHUB_APP_INSTALL_IDS = let
+                    mkPairStr = org: installId: "${org}=${builtins.toString installId}";
+                  in
+                    lib.pipe cfg.ghAppInstallIds [
+                      (lib.mapAttrsToList mkPairStr)
+                      (lib.concatStringsSep ",")
+                    ];
+                }
+                // lib.optionalAttrs (cfg.ghUserAgent != null) {
+                  GITHUB_USER_AGENT = cfg.ghUserAgent;
+                }
+                // lib.optionalAttrs (cfg.hydraUser != "") {
+                  HYDRA_USER = cfg.hydraUser;
+                };
 
-              export HYDRA_STATE_DIR="$STATE_DIRECTORY"
+              script = ''
+                export GITHUB_APP_KEY_FILE="$CREDENTIALS_DIRECTORY"/github-app-key-file
+                ${lib.optionalString (cfg.ghSecretFile != null) ''export GITHUB_WEBHOOK_SECRET=$(< "$CREDENTIALS_DIRECTORY"/github-secret)''}
+                ${lib.optionalString (cfg.hydraPassFile != null) ''export HYDRA_PASS=$(< "$CREDENTIALS_DIRECTORY"/hydra-pass)''}
 
-              exec ${lib.getExe cfg.package}
-            '';
-          };
-        }
-        // lib.optionalAttrs cfg.waitForHydraServerPort {
-          # Delay systemd's dependencies until Hydra actually listens.
-          # This is needed for After= ordering of the github-hydra-bridge
-          # because that tries to log in to use Hydra's API when it starts.
-          hydra-server.postStart = let
-            script = pkgs.writeShellApplication {
-              name = "hydra-wait-for-port";
-              runtimeInputs = [pkgs.netcat];
-              text = ''
-                while ! nc -z localhost ${toString config.services.hydra.port} 2> /dev/null; do
-                  sleep 1
-                done
+                export HYDRA_STATE_DIR="$STATE_DIRECTORY"
+
+                exec ${lib.getExe cfg.package}
               '';
             };
-          in ''
-            timeout 30 ${lib.getExe script}
-          '';
-        };
+          }
+          // lib.optionalAttrs cfg.waitForHydraServerPort {
+            # Delay systemd's dependencies until Hydra actually listens.
+            # This is needed for After= ordering of the github-hydra-bridge
+            # because that tries to log in to use Hydra's API when it starts.
+            hydra-server.postStart = let
+              script = pkgs.writeShellApplication {
+                name = "hydra-wait-for-port";
+                runtimeInputs = [pkgs.netcat];
+                text = ''
+                  while ! nc -z localhost ${toString config.services.hydra.port} 2> /dev/null; do
+                    sleep 1
+                  done
+                '';
+              };
+            in ''
+              timeout 30 ${lib.getExe script}
+            '';
+          };
       };
     });
 

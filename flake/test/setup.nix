@@ -33,7 +33,6 @@
         "app-key-file"
         {nativeBuildInputs = [pkgs.openssl];}
         "openssl genrsa -out $out";
-      ghTokenFile = pkgs.writeText "gh-secret-file" "secret-token";
       ghSecretFile = pkgs.writeText "gh-secret-file" "secret-token";
       hydraHost = "http://localhost:3000";
       hydraUser = "bridge";
