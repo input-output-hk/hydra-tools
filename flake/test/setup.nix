@@ -20,7 +20,7 @@
       buildMachinesFiles = [];
     };
 
-    hydra-github-bridge.all = {
+    hydra-github-bridge = {
       enable = true;
       ghAppId = 12345;
       ghAppInstallIds = {
@@ -95,5 +95,5 @@
   };
 
   # These will fail until Hydra and Mock GitHub are running
-  systemd.targets.hydra-github-bridge.after = ["mock-github.service"];
+  systemd.services.hydra-github-bridge.after = ["mock-github.service"];
 }
