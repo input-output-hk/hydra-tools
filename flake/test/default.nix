@@ -13,10 +13,16 @@
         pushedPayload = ./push.payload.txt;
         checkSuitePayload = ./check_suite.payload.txt;
         checkRunPayload = ./check_run.payload.txt;
+
+        # Seed a fake failed build into the Hydra database
+        seedFailedBuildSql = ./seed-failed-build.sql;
       in
         inputs.nixpkgs.lib.nixos.runTest ({nodes, ...}: {
           name = "test";
           hostPkgs = pkgs;
+
+          # Uncomment to debug interactively
+          # sshBackdoor.enable = true;
 
           # Pass packages to NixOS modules
           defaults._module.args.flakePackages = config.packages;
@@ -148,6 +154,32 @@
                 "jq --exit-status 'map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length >= 8'",
                 timeout=15
               )
+
+            with subtest("Failed build with invalid log updates check runs"):
+              # Seed a failed build in the Hydra DB
+              hydra.succeed("psql hydra hydra -f ${seedFailedBuildSql}")
+
+              # Create a build log file with invalid bytes (Windows UTF-16 BOM + raw binary).
+              hydra.succeed(
+                "mkdir -p /var/lib/hydra/build-logs/pl && "
+                "printf '\\xff\\xfe\\x00build output\\x80\\x81\\x82' "
+                "  > /var/lib/hydra/build-logs/pl/y5hyh8fxwkp82jsp42h8l8aq6zw7-test.drv"
+              )
+
+              # Fire the build_finished notification directly via psql
+              hydra.succeed(
+                "bid=$(psql hydra hydra -t -c 'SELECT id FROM builds ORDER BY id DESC LIMIT 1' | tr -d ' \\n') && "
+                "psql hydra hydra -c \"NOTIFY build_finished, '$bid'\""
+              )
+
+              # Verify another check run was created
+              hydra.wait_until_succeeds(
+                "curl -s 'http://localhost:4010/mockoon-admin/logs?limit=100' | "
+                "jq --exit-status 'map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length >= 9'",
+                timeout=15
+              )
+
+              hydra.succeed("systemctl is-active hydra-github-bridge.service")
 
             with subtest("Events from unauthorized repos are ignored"):
               # Create a new PR for an unauthorized repo

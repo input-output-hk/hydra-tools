@@ -90,7 +90,7 @@
     };
 
     # We'll want the test to fail if they crash
-    hydra-github-bridge-all.serviceConfig.Restart = lib.mkForce "no";
+    hydra-github-bridge.serviceConfig.Restart = lib.mkForce "no";
   };
 
   # These will fail until Hydra and Mock GitHub are running
