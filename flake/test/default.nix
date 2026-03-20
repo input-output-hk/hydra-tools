@@ -162,14 +162,15 @@
               # Create a build log file with invalid bytes (Windows UTF-16 BOM + raw binary).
               hydra.succeed(
                 "mkdir -p /var/lib/hydra/build-logs/pl && "
-                "printf '\\xff\\xfe\\x00build output\\x80\\x81\\x82' "
-                "  > /var/lib/hydra/build-logs/pl/y5hyh8fxwkp82jsp42h8l8aq6zw7-test.drv"
+                "printf '\\xff\\xfe\\x00build output\\x80\\x81\\x82' > "
+                "/var/lib/hydra/build-logs/pl/y5hyh8fxwkp82jsp42h8l8aq6zw7-test.drv.bz2"
               )
 
               # Fire the build_finished notification directly via psql
               hydra.succeed(
-                "bid=$(psql hydra hydra -t -c 'SELECT id FROM builds ORDER BY id DESC LIMIT 1' | tr -d ' \\n') && "
-                "psql hydra hydra -c \"NOTIFY build_finished, '$bid'\""
+                "psql hydra hydra -c "
+                "\"SELECT pg_notify('build_finished', id::text) "
+                "FROM (SELECT id FROM builds ORDER BY id DESC LIMIT 1) AS latest\""
               )
 
               # Verify another check run was created

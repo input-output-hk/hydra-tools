@@ -8,6 +8,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Lib.Bridge.HydraToGitHub
   ( HydraToGitHubEnv (..),
@@ -23,7 +24,6 @@ module Lib.Bridge.HydraToGitHub
   )
 where
 
-import Codec.Compression.BZip qualified as BZip
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async as Async
 import Control.Exception
@@ -33,7 +33,7 @@ import Control.Exception
     fromException,
     throw,
     toException,
-    try,
+    try, catch,
   )
 import Control.Monad
 import Control.Monad.IO.Class
@@ -42,7 +42,6 @@ import Data.Aeson hiding (Error, Success)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 (ByteString)
 import Data.ByteString.Char8 qualified as BS
-import Data.ByteString.Lazy qualified as BSLw
 import Data.Duration (oneSecond)
 import Data.Foldable (foldr')
 import Data.Functor ((<&>))
@@ -79,17 +78,8 @@ import Lib.GitHub qualified as GitHub
 import Lib.Hydra (BuildStatus)
 import Lib.Hydra qualified as Hydra
 import Network.HTTP.Client qualified as HTTP
-import System.FilePath
-  ( takeFileName,
-    (<.>),
-    (</>),
-  )
-import System.IO.Error
-  ( catchIOError,
-    ioeGetErrorType,
-    isDoesNotExistErrorType,
-  )
 import Text.Regex.TDFA ((=~))
+import Lib.Hydra.DB (readBuildLog)
 
 -- Text utils
 tshow :: (Show a) => a -> Text
@@ -646,21 +636,20 @@ handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJ
             | otherwise = Nothing
       whenStatusOrJob (Just ghCheckRunConclusion) prevStepStatus job $ do
         buildTimes <- getBuildTimes bid
-        let failedSteps = filter (\(_, _, statusInt) -> maybe False (/= Hydra.Succeeded) $ statusInt <&> toEnum) steps
+        let failedSteps =
+              filter
+                (\(_, _, statusInt) -> maybe False ((/= Hydra.Succeeded) . toEnum) statusInt)
+                steps
         failedStepLogs <-
-          sequence $
-            failedSteps <&> \(stepnr, drvpath, _) -> do
-              let drvName = takeFileName drvpath
-                  bucketed = take 2 drvName </> drop 2 drvName
-                  path = stateDir </> "build-logs" </> bucketed
-              logs <- catchIOError (readFile path >>= return . Just) $ \ioe ->
-                if not . isDoesNotExistErrorType . ioeGetErrorType $ ioe
-                  then ioError ioe
-                  else catchIOError (BSLw.readFile (path <.> "bz2") >>= return . Just . cs . BZip.decompress) $ \ioe2 ->
-                    if not . isDoesNotExistErrorType . ioeGetErrorType $ ioe2
-                      then ioError ioe2
-                      else return Nothing
-              return (stepnr, drvpath, logs)
+          mapM
+            ( \(stepnr, drvpath, _) -> do
+                logs <-
+                  catch @SomeException (readBuildLog stateDir drvpath) $ \err -> do
+                    Text.putStrLn $ "Warning: could not fetch logs: " <> Text.show err
+                    pure Nothing
+                pure (stepnr, drvpath, logs)
+            )
+            failedSteps
         output <- query conn ("SELECT path FROM buildoutputs WHERE name = 'out' and build = ? LIMIT 1") (Only bid) :: IO [(Only Text)]
         pure $
           singleton $
@@ -691,32 +680,33 @@ handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJ
                               else -- TODO: We should include some meta information about the build. Similar to what hydra provides on the
                               -- build page.
                                 let limit = 65535
-                                    maxLines = foldr' max 0 $ failedStepLogs <&> \(_, _, logs) -> maybe 0 length logs
-                                    indentPrefix = cs $ indentLine "" :: String
-                                    stepLogsLines = failedStepLogs <&> \(stepnr, drvpath, logs) -> (stepnr, drvpath, logs >>= Just . lines)
+                                    maxLines = foldr' max 0 $ failedStepLogs <&> \(_, _, logs) -> maybe 0 Text.length logs
+                                    indentPrefix = cs $ indentLine ""
+                                    stepLogsLines = failedStepLogs <&> \(stepnr, drvpath, logs) -> (stepnr, drvpath, logs >>= Just . Text.lines)
                                  in binarySearch 0 limit $ \numLines ->
-                                      let parts =
+                                      let parts :: [Text]
+                                          parts =
                                             singleton "# Failed Steps\n\n"
-                                              ++ intercalate
+                                              <> intercalate
                                                 (singleton "\n")
                                                 ( stepLogsLines <&> \(stepnr, drvpath, logLines) ->
                                                     [ "## Step ",
-                                                      show stepnr,
+                                                      Text.show stepnr,
                                                       "\n\n",
                                                       -- making code blocks by indenting instead of triple backticks so they cannot be escaped
                                                       "### Derivation\n\n",
                                                       indentPrefix,
-                                                      drvpath,
+                                                      Text.pack drvpath,
                                                       "\n\n",
                                                       "### Log\n\n"
                                                     ]
-                                                      ++ (if numLines < maxLines then ["Last ", show numLines, " lines:\n\n"] else [])
-                                                      ++ maybe
+                                                      <> (if numLines < maxLines then ["Last ", Text.show numLines, " lines:\n\n"] else [])
+                                                      <> maybe
                                                         (singleton "*Not available.*\n")
                                                         ((concatMap (\l -> [indentPrefix, l, "\n"])) . (takeEnd numLines))
                                                         logLines
                                                 )
-                                          totalLength = foldr' ((+) . length) 0 parts
+                                          totalLength = foldr' ((+) . Text.length) 0 parts
                                        in ( totalLength < limit && numLines < maxLines,
                                             if totalLength > limit then Nothing else Just . cs $ mconcat parts
                                           )
