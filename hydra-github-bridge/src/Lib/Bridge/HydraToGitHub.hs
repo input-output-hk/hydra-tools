@@ -28,12 +28,13 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async as Async
 import Control.Exception
   ( SomeException,
+    catch,
     catchJust,
     displayException,
     fromException,
     throw,
     toException,
-    try, catch,
+    try,
   )
 import Control.Monad
 import Control.Monad.IO.Class
@@ -77,9 +78,9 @@ import Lib.GitHub (CheckRunConclusion, TokenLease)
 import Lib.GitHub qualified as GitHub
 import Lib.Hydra (BuildStatus)
 import Lib.Hydra qualified as Hydra
+import Lib.Hydra.DB (readBuildLog)
 import Network.HTTP.Client qualified as HTTP
 import Text.Regex.TDFA ((=~))
-import Lib.Hydra.DB (readBuildLog)
 
 -- Text utils
 tshow :: (Show a) => a -> Text
