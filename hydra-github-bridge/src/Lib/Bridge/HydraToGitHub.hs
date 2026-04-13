@@ -29,9 +29,9 @@ import Control.Concurrent.Async as Async
 import Control.Exception
   ( SomeException,
     catch,
-    catchJust,
     displayException,
     fromException,
+    handleJust,
     throw,
     toException,
     try,
@@ -368,117 +368,18 @@ parseGitHubFlakeURI uri
         _ -> Nothing
 
 handleHydraNotification :: Connection -> Text -> FilePath -> Hydra.Notification -> IO [GitHub.CheckRun]
-handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJustPredicate computation (handler e)) $ case e of
-  -- Evaluations
-  (Hydra.EvalStarted jid) -> do
-    [(proj, name, flake, triggertime)] <- query conn "select project, name, flake, triggertime from jobsets where id = ?" (Only jid)
-    Text.putStrLn $ "Eval Started (" <> tshow jid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> tshow flake
-    withGithubFlake flake $ \owner repo hash ->
-      pure $
-        singleton $
-          GitHub.CheckRun owner repo $
-            GitHub.CheckRunPayload
-              { name = "ci/eval",
-                headSha = hash,
-                detailsUrl = Just $ "https://" <> host <> "/jobset/" <> proj <> "/" <> name,
-                externalId = Just $ tshow jid,
-                status = GitHub.InProgress,
-                conclusion = Nothing,
-                -- `triggertime` is `Nothing` if the evaluation is cached.
-                startedAt = (triggertime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
-                completedAt = Nothing,
-                output = Nothing
-              }
-  (Hydra.EvalAdded jid eid) -> handleEvalDone jid eid "Added"
-  (Hydra.EvalCached jid eid) -> handleEvalDone jid eid "Cached"
-  (Hydra.EvalFailed jid) -> do
-    [(proj, name, flake, fetcherrormsg, errormsg, errortime)] <- query conn "select project, name, flake, fetcherrormsg, errormsg, errortime from jobsets where id = ?" (Only jid)
-    Text.putStrLn $ "Eval Failed (" <> tshow jid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> tshow (parseGitHubFlakeURI flake)
-    withGithubFlake flake $ \owner repo hash ->
-      pure $
-        singleton $
-          GitHub.CheckRun owner repo $
-            GitHub.CheckRunPayload
-              { name = "ci/eval",
-                headSha = hash,
-                detailsUrl = Just $ "https://" <> host <> "/jobset/" <> proj <> "/" <> name,
-                externalId = Just $ tshow jid,
-                status = GitHub.Completed,
-                conclusion = Just GitHub.Failure,
-                startedAt = Nothing, -- Hydra does not record this information but GitHub still has it
-                completedAt = Just . posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral (errortime :: Int),
-                output =
-                  Just $
-                    GitHub.CheckRunOutput
-                      { title = "Evaluation failed",
-                        summary = "",
-                        text =
-                          maybe
-                            (errormsg >>= mkEvalErrorSummary)
-                            mkFetchErrorSummary
-                            fetcherrormsg
-                      }
-              }
-
-  -- Builds
-  (Hydra.BuildQueued bid) -> do
-    [(proj, name, flake, job, desc)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description" <> sqlFromBuild) (Only bid)
-    Text.putStrLn $ "Build Queued (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
-    steps <- query conn ("SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2") (Only bid) :: IO [(Only (Maybe Int))]
-    let prevStepStatus
-          | length steps >= 2 = (\(Only statusInt) -> statusInt <&> toEnum) $ steps !! 1
-          | otherwise = Nothing
-    whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
-      pure $
-        singleton $
-          GitHub.CheckRun owner repo $
-            GitHub.CheckRunPayload
-              { name = "ci/hydra-build:" <> job,
-                headSha = hash,
-                detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-                externalId = Just $ tshow bid,
-                status = GitHub.Queued,
-                conclusion = Nothing,
-                startedAt = Nothing,
-                completedAt = Nothing,
-                output = Nothing
-              }
-  (Hydra.BuildStarted bid) -> do
-    [(proj, name, flake, job, desc, starttime)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description, b.starttime" <> sqlFromBuild) (Only bid)
-    Text.putStrLn $ "Build Started (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
-    steps <- query conn ("SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2") (Only bid) :: IO [(Only (Maybe Int))]
-    let prevStepStatus
-          | length steps >= 2 = (\(Only statusInt) -> statusInt <&> toEnum) $ steps !! 1
-          | otherwise = Nothing
-    whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
-      pure $
-        singleton $
-          GitHub.CheckRun owner repo $
-            GitHub.CheckRunPayload
-              { name = "ci/hydra-build:" <> job,
-                headSha = hash,
-                detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-                externalId = Just $ tshow bid,
-                status = GitHub.InProgress,
-                conclusion = Nothing,
-                -- apparently hydra may send the notification before actually starting the build... got 9 seconds difference when testing!
-                startedAt = (starttime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
-                completedAt = Nothing,
-                output = Nothing
-              }
-
-  -- note; buildstatus is only != NULL for Finished, Queued and Started leave it as NULL.
-  (Hydra.BuildFinished bid depBids) -> do
-    [(proj, name, flake, job, desc, finished, status)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description, b.finished, b.buildstatus" <> sqlFromBuild) (Only bid)
-    Text.putStrLn $ "Build Finished (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
-    withGithubFlake flake $ \owner repo hash -> do
-      checkRun <- handleBuildDone bid job status (finished == (1 :: Int)) owner repo hash
-      depCheckRuns <-
-        sequence $
-          (if toEnum status /= Hydra.Succeeded then depBids else []) <&> \depBid -> do
-            [(depJob, depStatus, depFinished)] <- query conn "SELECT job, buildstatus, finished FROM builds WHERE id = ?" (Only depBid)
-            handleBuildDone depBid depJob depStatus (depFinished == (1 :: Int)) owner repo hash
-      return $ checkRun ++ concat depCheckRuns
+handleHydraNotification conn host stateDir notification =
+  handleJust catchJustPredicate (handler notification) $
+    case notification of
+      -- Evaluations
+      (Hydra.EvalStarted jid) -> handleEvalStarted conn host jid
+      (Hydra.EvalAdded jid eid) -> handleEvalDone conn host stateDir jid eid "Added"
+      (Hydra.EvalCached jid eid) -> handleEvalDone conn host stateDir jid eid "Cached"
+      (Hydra.EvalFailed jid) -> handleEvalFailed conn host jid
+      -- Builds
+      (Hydra.BuildQueued bid) -> handleBuildQueued conn host bid
+      (Hydra.BuildStarted bid) -> handleBuildStarted conn host bid
+      (Hydra.BuildFinished bid depBids) -> handleBuildFinished conn host stateDir bid depBids
   where
     catchJustPredicate ee
       | Just (_ :: Async.AsyncCancelled) <- fromException ee = Nothing
@@ -487,232 +388,180 @@ handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJ
     handler :: Hydra.Notification -> SomeException -> IO [GitHub.CheckRun]
     handler n ex = print ("ERROR: " ++ show n ++ " triggert exception " ++ displayException ex) >> pure ([] :: [GitHub.CheckRun])
 
-    sqlFromBuild = " from builds b JOIN jobsets j on b.jobset_id = j.id JOIN jobsetevalmembers m on m.build = b.id JOIN jobsetevals e on e.id = m.eval where b.id = ? order by e.id desc fetch first row only"
+handleEvalStarted ::
+  Connection ->
+  Text ->
+  Hydra.JobSetId ->
+  IO [GitHub.CheckRun]
+handleEvalStarted conn host jid = do
+  [(proj, name, flake, triggertime)] <- query conn "select project, name, flake, triggertime from jobsets where id = ?" (Only jid)
+  Text.putStrLn $ "Eval Started (" <> tshow jid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> tshow flake
+  withGithubFlake flake $ \owner repo hash ->
+    pure $
+      singleton $
+        GitHub.CheckRun owner repo $
+          GitHub.CheckRunPayload
+            { name = "ci/eval",
+              headSha = hash,
+              detailsUrl = Just $ "https://" <> host <> "/jobset/" <> proj <> "/" <> name,
+              externalId = Just $ tshow jid,
+              status = GitHub.InProgress,
+              conclusion = Nothing,
+              -- `triggertime` is `Nothing` if the evaluation is cached.
+              startedAt = (triggertime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
+              completedAt = Nothing,
+              output = Nothing
+            }
 
-    handleEvalDone :: Hydra.JobSetId -> Hydra.EvalId -> Text -> IO [GitHub.CheckRun]
-    handleEvalDone jid eid eventName = do
-      [(proj, name, flake, errmsg, fetcherrmsg)] <- query conn "select project, name, flake, errormsg, fetcherrormsg from jobsets where id = ?" (Only jid)
-      [(flake', timestamp, checkouttime, evaltime)] <- query conn "select flake, timestamp, checkouttime, evaltime from jobsetevals where id = ?" (Only eid) :: IO [(Text, Int, Int, Int)]
-      Text.putStrLn $ "Eval " <> eventName <> " (" <> tshow jid <> ", " <> tshow eid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> flake <> " eval for: " <> flake'
-      withGithubFlake flake' $ \owner repo hash -> do
-        let startedAt = posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral timestamp
-            fetchCompletedAt = addUTCTime (fromIntegral checkouttime) startedAt
-            evalCompletedAt = addUTCTime (fromIntegral evaltime) fetchCompletedAt
-            summary = mkEvalDurationSummary checkouttime (if isNothing fetcherrmsg then Just evaltime else Nothing)
-        evalStatuses <- pure $ case (errmsg, fetcherrmsg) :: (Maybe Text, Maybe Text) of
-          (Just err, _)
-            | not (Text.null err) ->
-                ( singleton $
-                    GitHub.CheckRun owner repo $
-                      GitHub.CheckRunPayload
-                        { name = "ci/eval",
-                          headSha = hash,
-                          detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
-                          externalId = Just $ tshow eid,
-                          status = GitHub.Completed,
-                          conclusion = Just GitHub.Failure,
-                          startedAt = Just startedAt,
-                          completedAt = Just evalCompletedAt,
-                          output =
-                            Just $
-                              GitHub.CheckRunOutput
-                                { title = "Evaluation has errors",
-                                  summary = summary,
-                                  text = mkEvalErrorSummary err
-                                }
-                        }
-                )
-                  -- Creates a failed check run for each job that failed to evaluate.
-                  -- This is temporarily disabled (by simply passing an empty string)
-                  -- because there is no way to get rid of these later when the eval
-                  -- succeeds on a retry, confusing everyone.
-                  ++ ( (parseFailedJobEvals {- err -} "") <&> \(job, msg) ->
-                         GitHub.CheckRun owner repo $
-                           GitHub.CheckRunPayload
-                             { name = "ci/eval:" <> job,
-                               headSha = hash,
-                               detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
-                               externalId = Just $ tshow eid,
-                               status = GitHub.Completed,
-                               conclusion = Just GitHub.Failure,
-                               startedAt = Just startedAt,
-                               completedAt = Just evalCompletedAt,
-                               output =
-                                 Just $
-                                   GitHub.CheckRunOutput
-                                     { title = "Evaluation failed",
-                                       summary = summary,
-                                       text = mkEvalErrorSummary msg
-                                     }
-                             }
-                     )
-          (_, Just err)
-            | not (Text.null err) ->
-                singleton $
-                  GitHub.CheckRun owner repo $
-                    GitHub.CheckRunPayload
-                      { name = "ci/eval",
-                        headSha = hash,
-                        detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
-                        externalId = Just $ tshow eid,
-                        status = GitHub.Completed,
-                        conclusion = Just GitHub.Failure,
-                        startedAt = Just startedAt,
-                        completedAt = Just fetchCompletedAt,
-                        output =
-                          Just $
-                            GitHub.CheckRunOutput
-                              { title = "Failed to fetch",
-                                summary = summary,
-                                text = mkFetchErrorSummary err
-                              }
-                      }
-          _ ->
+handleEvalDone ::
+  Connection ->
+  Text ->
+  FilePath ->
+  Hydra.JobSetId ->
+  Hydra.EvalId ->
+  Text ->
+  IO [GitHub.CheckRun]
+handleEvalDone conn host stateDir jid eid eventName = do
+  [(proj, name, flake, errmsg, fetcherrmsg)] <- query conn "select project, name, flake, errormsg, fetcherrormsg from jobsets where id = ?" (Only jid)
+  [(flake', timestamp, checkouttime, evaltime)] <- query conn "select flake, timestamp, checkouttime, evaltime from jobsetevals where id = ?" (Only eid) :: IO [(Text, Int, Int, Int)]
+  Text.putStrLn $ "Eval " <> eventName <> " (" <> tshow jid <> ", " <> tshow eid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> flake <> " eval for: " <> flake'
+  withGithubFlake flake' $ \owner repo hash -> do
+    let startedAt = posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral timestamp
+        fetchCompletedAt = addUTCTime (fromIntegral checkouttime) startedAt
+        evalCompletedAt = addUTCTime (fromIntegral evaltime) fetchCompletedAt
+        summary = mkEvalDurationSummary checkouttime (if isNothing fetcherrmsg then Just evaltime else Nothing)
+    evalStatuses <- pure $ case (errmsg, fetcherrmsg) :: (Maybe Text, Maybe Text) of
+      (Just err, _)
+        | not (Text.null err) ->
+            ( singleton $
+                GitHub.CheckRun owner repo $
+                  GitHub.CheckRunPayload
+                    { name = "ci/eval",
+                      headSha = hash,
+                      detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
+                      externalId = Just $ tshow eid,
+                      status = GitHub.Completed,
+                      conclusion = Just GitHub.Failure,
+                      startedAt = Just startedAt,
+                      completedAt = Just evalCompletedAt,
+                      output =
+                        Just $
+                          GitHub.CheckRunOutput
+                            { title = "Evaluation has errors",
+                              summary = summary,
+                              text = mkEvalErrorSummary err
+                            }
+                    }
+            )
+              -- Creates a failed check run for each job that failed to evaluate.
+              -- This is temporarily disabled (by simply passing an empty string)
+              -- because there is no way to get rid of these later when the eval
+              -- succeeds on a retry, confusing everyone.
+              ++ ( (parseFailedJobEvals {- err -} "") <&> \(job, msg) ->
+                     GitHub.CheckRun owner repo $
+                       GitHub.CheckRunPayload
+                         { name = "ci/eval:" <> job,
+                           headSha = hash,
+                           detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
+                           externalId = Just $ tshow eid,
+                           status = GitHub.Completed,
+                           conclusion = Just GitHub.Failure,
+                           startedAt = Just startedAt,
+                           completedAt = Just evalCompletedAt,
+                           output =
+                             Just $
+                               GitHub.CheckRunOutput
+                                 { title = "Evaluation failed",
+                                   summary = summary,
+                                   text = mkEvalErrorSummary msg
+                                 }
+                         }
+                 )
+      (_, Just err)
+        | not (Text.null err) ->
             singleton $
               GitHub.CheckRun owner repo $
                 GitHub.CheckRunPayload
                   { name = "ci/eval",
                     headSha = hash,
-                    detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid,
+                    detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
                     externalId = Just $ tshow eid,
                     status = GitHub.Completed,
-                    conclusion = Just GitHub.Success,
+                    conclusion = Just GitHub.Failure,
                     startedAt = Just startedAt,
-                    completedAt = Just evalCompletedAt,
+                    completedAt = Just fetchCompletedAt,
                     output =
                       Just $
                         GitHub.CheckRunOutput
-                          { title = "Evaluation succeeded",
+                          { title = "Failed to fetch",
                             summary = summary,
-                            text = Nothing
+                            text = mkFetchErrorSummary err
                           }
                   }
-        -- If this evaluation has builds (is not identical to a previous one), this selects no rows.
-        -- Otherwise this selects all builds of the latest previous evaluation that differed from its predecessor.
-        -- We then submit a status for each of these builds to the jobset's flake URL (the current one).
-        -- This is necessary because `(cached_)?build_finished` notifications are not sent by Hydra
-        -- when an evaluation is identical to its predecessor / has no builds.
-        rows <-
-          query
-            conn
-            "\
-            \WITH prev_jobseteval AS (              \
-            \    SELECT *                           \
-            \    FROM jobsetevals                   \
-            \    WHERE                              \
-            \        id < ? AND                     \
-            \        jobset_id = ? AND              \
-            \        hasnewbuilds = 1               \
-            \    ORDER BY id DESC                   \
-            \    FETCH FIRST ROW ONLY               \
-            \)                                      \
-            \SELECT b.id, b.job, b.buildstatus      \
-            \FROM builds b                          \
-            \JOIN prev_jobseteval e ON NOT EXISTS ( \
-            \    SELECT NULL                        \
-            \    FROM jobsetevals                   \
-            \    WHERE                              \
-            \        id = ? AND                     \
-            \        hasnewbuilds = 1               \
-            \)                                      \
-            \JOIN jobsetevalmembers m ON            \
-            \    m.build = b.id AND                 \
-            \    m.eval = e.id                      \
-            \WHERE b.finished = 1                   \
-            \ "
-            [eid, jid, eid] ::
-            IO [(Int, Text, Int)]
-        buildStatuses <- sequence $ rows <&> \(bid, job, status) -> handleBuildDone bid job status True owner repo hash
-        pure $ evalStatuses ++ concat buildStatuses
-
-    handleBuildDone :: Hydra.BuildId -> Text -> Int -> Bool -> Text -> Text -> Text -> IO [GitHub.CheckRun]
-    handleBuildDone bid job status finished owner repo hash = do
-      let buildStatus = toEnum status
-      let ghCheckRunConclusion
-            | finished = toCheckRunConclusion buildStatus
-            | otherwise = GitHub.Failure
-      steps <- query conn ("SELECT stepnr, drvpath, status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC") (Only bid) :: IO [(Int, String, Maybe Int)]
-      let prevStepStatus
-            | length steps >= 2 = (\(_, _, statusInt) -> statusInt <&> toEnum) $ steps !! 1
-            | otherwise = Nothing
-      whenStatusOrJob (Just ghCheckRunConclusion) prevStepStatus job $ do
-        buildTimes <- getBuildTimes bid
-        let failedSteps =
-              filter
-                (\(_, _, statusInt) -> maybe False ((/= Hydra.Succeeded) . toEnum) statusInt)
-                steps
-        failedStepLogs <-
-          mapM
-            ( \(stepnr, drvpath, _) -> do
-                logs <-
-                  catch @SomeException (readBuildLog stateDir drvpath) $ \err -> do
-                    Text.putStrLn $ "Warning: could not fetch logs: " <> Text.show err
-                    pure Nothing
-                pure (stepnr, drvpath, logs)
-            )
-            failedSteps
-        output <- query conn ("SELECT path FROM buildoutputs WHERE name = 'out' and build = ? LIMIT 1") (Only bid) :: IO [(Only Text)]
-        pure $
-          singleton $
-            GitHub.CheckRun owner repo $
-              GitHub.CheckRunPayload
-                { name = "ci/hydra-build:" <> job,
-                  headSha = hash,
-                  detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-                  externalId = Just $ tshow bid,
-                  status = GitHub.Completed,
-                  conclusion = Just ghCheckRunConclusion,
-                  startedAt = buildTimes >>= Just . fst,
-                  completedAt = buildTimes >>= Just . snd,
-                  output =
-                    Just $
-                      GitHub.CheckRunOutput
-                        { title = tshow buildStatus,
-                          summary =
-                            if buildStatus == Hydra.Succeeded
-                              then -- TODO: This is only the "out" path, maybe we do want to put _all_ paths in here JSON encoded?
-                              -- The idea is that on successful builds, we can grab the nix paths (if needed) directly out of the
-                              -- github status. And use it for nix-store -r, or similar.
-                                Text.intercalate ", " (fmap fromOnly output)
-                              else tshow (length failedSteps) <> " failed steps",
-                          text =
-                            if buildStatus == Hydra.Succeeded
-                              then Nothing
-                              else -- TODO: We should include some meta information about the build. Similar to what hydra provides on the
-                              -- build page.
-                                let limit = 65535
-                                    maxLines = foldr' max 0 $ failedStepLogs <&> \(_, _, logs) -> maybe 0 Text.length logs
-                                    indentPrefix = cs $ indentLine ""
-                                    stepLogsLines = failedStepLogs <&> \(stepnr, drvpath, logs) -> (stepnr, drvpath, logs >>= Just . Text.lines)
-                                 in binarySearch 0 limit $ \numLines ->
-                                      let parts :: [Text]
-                                          parts =
-                                            singleton "# Failed Steps\n\n"
-                                              <> intercalate
-                                                (singleton "\n")
-                                                ( stepLogsLines <&> \(stepnr, drvpath, logLines) ->
-                                                    [ "## Step ",
-                                                      Text.show stepnr,
-                                                      "\n\n",
-                                                      -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                                                      "### Derivation\n\n",
-                                                      indentPrefix,
-                                                      Text.pack drvpath,
-                                                      "\n\n",
-                                                      "### Log\n\n"
-                                                    ]
-                                                      <> (if numLines < maxLines then ["Last ", Text.show numLines, " lines:\n\n"] else [])
-                                                      <> maybe
-                                                        (singleton "*Not available.*\n")
-                                                        ((concatMap (\l -> [indentPrefix, l, "\n"])) . (takeEnd numLines))
-                                                        logLines
-                                                )
-                                          totalLength = foldr' ((+) . Text.length) 0 parts
-                                       in ( totalLength < limit && numLines < maxLines,
-                                            if totalLength > limit then Nothing else Just . cs $ mconcat parts
-                                          )
-                        }
-                }
+      _ ->
+        singleton $
+          GitHub.CheckRun owner repo $
+            GitHub.CheckRunPayload
+              { name = "ci/eval",
+                headSha = hash,
+                detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid,
+                externalId = Just $ tshow eid,
+                status = GitHub.Completed,
+                conclusion = Just GitHub.Success,
+                startedAt = Just startedAt,
+                completedAt = Just evalCompletedAt,
+                output =
+                  Just $
+                    GitHub.CheckRunOutput
+                      { title = "Evaluation succeeded",
+                        summary = summary,
+                        text = Nothing
+                      }
+              }
+    -- If this evaluation has builds (is not identical to a previous one), this selects no rows.
+    -- Otherwise this selects all builds of the latest previous evaluation that differed from its predecessor.
+    -- We then submit a status for each of these builds to the jobset's flake URL (the current one).
+    -- This is necessary because `(cached_)?build_finished` notifications are not sent by Hydra
+    -- when an evaluation is identical to its predecessor / has no builds.
+    rows <-
+      query
+        conn
+        "\
+        \WITH prev_jobseteval AS (              \
+        \    SELECT *                           \
+        \    FROM jobsetevals                   \
+        \    WHERE                              \
+        \        id < ? AND                     \
+        \        jobset_id = ? AND              \
+        \        hasnewbuilds = 1               \
+        \    ORDER BY id DESC                   \
+        \    FETCH FIRST ROW ONLY               \
+        \)                                      \
+        \SELECT b.id, b.job, b.buildstatus      \
+        \FROM builds b                          \
+        \JOIN prev_jobseteval e ON NOT EXISTS ( \
+        \    SELECT NULL                        \
+        \    FROM jobsetevals                   \
+        \    WHERE                              \
+        \        id = ? AND                     \
+        \        hasnewbuilds = 1               \
+        \)                                      \
+        \JOIN jobsetevalmembers m ON            \
+        \    m.build = b.id AND                 \
+        \    m.eval = e.id                      \
+        \WHERE b.finished = 1                   \
+        \ "
+        [eid, jid, eid] ::
+        IO [(Int, Text, Int)]
+    buildStatuses <- sequence $ rows <&> \(bid, job, status) -> handleBuildDone conn host stateDir bid job status True owner repo hash
+    pure $ evalStatuses ++ concat buildStatuses
+  where
+    mkEvalDurationSummary :: Int -> Maybe Int -> Text
+    mkEvalDurationSummary checkouttime evaltime =
+      "Checkout took "
+        <> humanReadableDuration (fromIntegral checkouttime * oneSecond)
+        <> "."
+        <> maybe mempty (\j -> "\nEvaluation took " <> humanReadableDuration (fromIntegral j * oneSecond) <> ".") evaltime
 
     -- Given an evaluation's error message, returns the jobs that could not be evaluated and their excerpt from the error message.
     parseFailedJobEvals :: Text -> [(Text, Text)]
@@ -730,8 +579,293 @@ handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJ
                in singleton (before, job, msg) ++ next
             _ -> []
 
-    getBuildTimes :: Hydra.BuildId -> IO (Maybe (UTCTime, UTCTime))
-    getBuildTimes bid = do
+    mkEvalErrorSummary :: Text -> Maybe Text
+    mkEvalErrorSummary errmsg =
+      let limit = 65535
+          errmsgLines = Text.lines errmsg
+          maxLines = length errmsgLines
+          indentPrefix = indentLine ""
+       in binarySearch 0 limit $ \numLines ->
+            let parts =
+                  singleton "Evaluation error:\n\n"
+                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
+                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines errmsgLines)
+                totalLength = foldr' ((+) . Text.length) 0 parts
+             in ( totalLength < limit && numLines < maxLines,
+                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
+                )
+
+    mkFetchErrorSummary :: Text -> Maybe Text
+    mkFetchErrorSummary fetcherrmsg =
+      let limit = 65535
+          fetcherrmsgLines = Text.lines fetcherrmsg
+          maxLines = length fetcherrmsgLines
+          indentPrefix = indentLine ""
+       in binarySearch 0 limit $ \numLines ->
+            let parts =
+                  singleton "Fetch error:\n\n"
+                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
+                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines fetcherrmsgLines)
+                totalLength = foldr' ((+) . Text.length) 0 parts
+             in ( totalLength < limit && numLines < maxLines,
+                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
+                )
+
+handleEvalFailed ::
+  Connection ->
+  Text ->
+  Hydra.JobSetId ->
+  IO [GitHub.CheckRun]
+handleEvalFailed conn host jid = do
+  [(proj, name, flake, fetcherrormsg, errormsg, errortime)] <- query conn "select project, name, flake, fetcherrormsg, errormsg, errortime from jobsets where id = ?" (Only jid)
+  Text.putStrLn $ "Eval Failed (" <> tshow jid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> tshow (parseGitHubFlakeURI flake)
+  withGithubFlake flake $ \owner repo hash ->
+    pure $
+      singleton $
+        GitHub.CheckRun owner repo $
+          GitHub.CheckRunPayload
+            { name = "ci/eval",
+              headSha = hash,
+              detailsUrl = Just $ "https://" <> host <> "/jobset/" <> proj <> "/" <> name,
+              externalId = Just $ tshow jid,
+              status = GitHub.Completed,
+              conclusion = Just GitHub.Failure,
+              startedAt = Nothing, -- Hydra does not record this information but GitHub still has it
+              completedAt = Just . posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral (errortime :: Int),
+              output =
+                Just $
+                  GitHub.CheckRunOutput
+                    { title = "Evaluation failed",
+                      summary = "",
+                      text =
+                        maybe
+                          (errormsg >>= mkEvalErrorSummary)
+                          mkFetchErrorSummary
+                          fetcherrormsg
+                    }
+            }
+  where
+    mkEvalErrorSummary :: Text -> Maybe Text
+    mkEvalErrorSummary errmsg =
+      let limit = 65535
+          errmsgLines = Text.lines errmsg
+          maxLines = length errmsgLines
+          indentPrefix = indentLine ""
+       in binarySearch 0 limit $ \numLines ->
+            let parts =
+                  singleton "Evaluation error:\n\n"
+                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
+                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines errmsgLines)
+                totalLength = foldr' ((+) . Text.length) 0 parts
+             in ( totalLength < limit && numLines < maxLines,
+                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
+                )
+
+    mkFetchErrorSummary :: Text -> Maybe Text
+    mkFetchErrorSummary fetcherrmsg =
+      let limit = 65535
+          fetcherrmsgLines = Text.lines fetcherrmsg
+          maxLines = length fetcherrmsgLines
+          indentPrefix = indentLine ""
+       in binarySearch 0 limit $ \numLines ->
+            let parts =
+                  singleton "Fetch error:\n\n"
+                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
+                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines fetcherrmsgLines)
+                totalLength = foldr' ((+) . Text.length) 0 parts
+             in ( totalLength < limit && numLines < maxLines,
+                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
+                )
+
+handleBuildQueued ::
+  Connection ->
+  Text ->
+  Hydra.BuildId ->
+  IO [GitHub.CheckRun]
+handleBuildQueued conn host bid = do
+  [(proj, name, flake, job, desc)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description" <> sqlFromBuild) (Only bid)
+  Text.putStrLn $ "Build Queued (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
+  steps <- query conn ("SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2") (Only bid) :: IO [(Only (Maybe Int))]
+  let prevStepStatus
+        | length steps >= 2 = (\(Only statusInt) -> statusInt <&> toEnum) $ steps !! 1
+        | otherwise = Nothing
+  whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
+    pure $
+      singleton $
+        GitHub.CheckRun owner repo $
+          GitHub.CheckRunPayload
+            { name = "ci/hydra-build:" <> job,
+              headSha = hash,
+              detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+              externalId = Just $ tshow bid,
+              status = GitHub.Queued,
+              conclusion = Nothing,
+              startedAt = Nothing,
+              completedAt = Nothing,
+              output = Nothing
+            }
+  where
+    sqlFromBuild = " from builds b JOIN jobsets j on b.jobset_id = j.id JOIN jobsetevalmembers m on m.build = b.id JOIN jobsetevals e on e.id = m.eval where b.id = ? order by e.id desc fetch first row only"
+
+handleBuildStarted ::
+  Connection ->
+  Text ->
+  Hydra.BuildId ->
+  IO [GitHub.CheckRun]
+handleBuildStarted conn host bid = do
+  [(proj, name, flake, job, desc, starttime)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description, b.starttime" <> sqlFromBuild) (Only bid)
+  Text.putStrLn $ "Build Started (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
+  steps <- query conn ("SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2") (Only bid) :: IO [(Only (Maybe Int))]
+  let prevStepStatus
+        | length steps >= 2 = (\(Only statusInt) -> statusInt <&> toEnum) $ steps !! 1
+        | otherwise = Nothing
+  whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
+    pure $
+      singleton $
+        GitHub.CheckRun owner repo $
+          GitHub.CheckRunPayload
+            { name = "ci/hydra-build:" <> job,
+              headSha = hash,
+              detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+              externalId = Just $ tshow bid,
+              status = GitHub.InProgress,
+              conclusion = Nothing,
+              -- apparently hydra may send the notification before actually starting the build... got 9 seconds difference when testing!
+              startedAt = (starttime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
+              completedAt = Nothing,
+              output = Nothing
+            }
+  where
+    sqlFromBuild = " from builds b JOIN jobsets j on b.jobset_id = j.id JOIN jobsetevalmembers m on m.build = b.id JOIN jobsetevals e on e.id = m.eval where b.id = ? order by e.id desc fetch first row only"
+
+handleBuildFinished ::
+  Connection ->
+  Text ->
+  FilePath ->
+  Hydra.BuildId ->
+  [Hydra.BuildId] ->
+  IO [GitHub.CheckRun]
+handleBuildFinished conn host stateDir bid depBids = do
+  -- note; buildstatus is only != NULL for Finished, Queued and Started leave it as NULL.
+  [(proj, name, flake, job, desc, finished, status)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description, b.finished, b.buildstatus" <> sqlFromBuild) (Only bid)
+  Text.putStrLn $ "Build Finished (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
+  withGithubFlake flake $ \owner repo hash -> do
+    checkRun <- handleBuildDone conn host stateDir bid job status (finished == (1 :: Int)) owner repo hash
+    depCheckRuns <-
+      sequence $
+        (if toEnum status /= Hydra.Succeeded then depBids else []) <&> \depBid -> do
+          [(depJob, depStatus, depFinished)] <- query conn "SELECT job, buildstatus, finished FROM builds WHERE id = ?" (Only depBid)
+          handleBuildDone conn host stateDir depBid depJob depStatus (depFinished == (1 :: Int)) owner repo hash
+    return $ checkRun ++ concat depCheckRuns
+  where
+    sqlFromBuild = " from builds b JOIN jobsets j on b.jobset_id = j.id JOIN jobsetevalmembers m on m.build = b.id JOIN jobsetevals e on e.id = m.eval where b.id = ? order by e.id desc fetch first row only"
+
+handleBuildDone ::
+  Connection ->
+  Text ->
+  FilePath ->
+  Hydra.BuildId ->
+  Text ->
+  Int ->
+  Bool ->
+  Text ->
+  Text ->
+  Text ->
+  IO [GitHub.CheckRun]
+handleBuildDone conn host stateDir bid job status finished owner repo hash = do
+  let buildStatus = toEnum status
+  let ghCheckRunConclusion
+        | finished = toCheckRunConclusion buildStatus
+        | otherwise = GitHub.Failure
+  steps <- query conn ("SELECT stepnr, drvpath, status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC") (Only bid) :: IO [(Int, String, Maybe Int)]
+  let prevStepStatus
+        | length steps >= 2 = (\(_, _, statusInt) -> statusInt <&> toEnum) $ steps !! 1
+        | otherwise = Nothing
+  whenStatusOrJob (Just ghCheckRunConclusion) prevStepStatus job $ do
+    buildTimes <- getBuildTimes
+    let failedSteps =
+          filter
+            (\(_, _, statusInt) -> maybe False ((/= Hydra.Succeeded) . toEnum) statusInt)
+            steps
+    failedStepLogs <-
+      mapM
+        ( \(stepnr, drvpath, _) -> do
+            logs <-
+              catch @SomeException (readBuildLog stateDir drvpath) $ \err -> do
+                Text.putStrLn $ "Warning: could not fetch logs: " <> Text.show err
+                pure Nothing
+            pure (stepnr, drvpath, logs)
+        )
+        failedSteps
+    output <- query conn ("SELECT path FROM buildoutputs WHERE name = 'out' and build = ? LIMIT 1") (Only bid) :: IO [(Only Text)]
+    pure $
+      singleton $
+        GitHub.CheckRun owner repo $
+          GitHub.CheckRunPayload
+            { name = "ci/hydra-build:" <> job,
+              headSha = hash,
+              detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+              externalId = Just $ tshow bid,
+              status = GitHub.Completed,
+              conclusion = Just ghCheckRunConclusion,
+              startedAt = buildTimes >>= Just . fst,
+              completedAt = buildTimes >>= Just . snd,
+              output =
+                Just $
+                  GitHub.CheckRunOutput
+                    { title = tshow buildStatus,
+                      summary =
+                        if buildStatus == Hydra.Succeeded
+                          then -- TODO: This is only the "out" path, maybe we do want to put _all_ paths in here JSON encoded?
+                          -- The idea is that on successful builds, we can grab the nix paths (if needed) directly out of the
+                          -- github status. And use it for nix-store -r, or similar.
+                            Text.intercalate ", " (fmap fromOnly output)
+                          else tshow (length failedSteps) <> " failed steps",
+                      text =
+                        if buildStatus == Hydra.Succeeded
+                          then Nothing
+                          else -- TODO: We should include some meta information about the build. Similar to what hydra provides on the
+                          -- build page.
+                            let limit = 65535
+                                maxLines = foldr' max 0 $ failedStepLogs <&> \(_, _, logs) -> maybe 0 Text.length logs
+                                indentPrefix = cs $ indentLine ""
+                                stepLogsLines = failedStepLogs <&> \(stepnr, drvpath, logs) -> (stepnr, drvpath, logs >>= Just . Text.lines)
+                             in binarySearch 0 limit $ \numLines ->
+                                  let parts :: [Text]
+                                      parts =
+                                        singleton "# Failed Steps\n\n"
+                                          <> intercalate
+                                            (singleton "\n")
+                                            ( stepLogsLines <&> \(stepnr, drvpath, logLines) ->
+                                                [ "## Step ",
+                                                  Text.show stepnr,
+                                                  "\n\n",
+                                                  -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                                                  "### Derivation\n\n",
+                                                  indentPrefix,
+                                                  Text.pack drvpath,
+                                                  "\n\n",
+                                                  "### Log\n\n"
+                                                ]
+                                                  <> (if numLines < maxLines then ["Last ", Text.show numLines, " lines:\n\n"] else [])
+                                                  <> maybe
+                                                    (singleton "*Not available.*\n")
+                                                    ((concatMap (\l -> [indentPrefix, l, "\n"])) . (takeEnd numLines))
+                                                    logLines
+                                            )
+                                      totalLength = foldr' ((+) . Text.length) 0 parts
+                                   in ( totalLength < limit && numLines < maxLines,
+                                        if totalLength > limit then Nothing else Just . cs $ mconcat parts
+                                      )
+                    }
+            }
+  where
+    getBuildTimes :: IO (Maybe (UTCTime, UTCTime))
+    getBuildTimes = do
       rows <-
         query
           conn
@@ -793,47 +927,6 @@ handleHydraNotification conn host stateDir e = (\computation -> catchJust catchJ
               posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral stoptime
             )
         _ -> Nothing
-
-    mkEvalDurationSummary :: Int -> Maybe Int -> Text
-    mkEvalDurationSummary checkouttime evaltime =
-      "Checkout took "
-        <> humanReadableDuration (fromIntegral checkouttime * oneSecond)
-        <> "."
-        <> maybe mempty (\j -> "\nEvaluation took " <> humanReadableDuration (fromIntegral j * oneSecond) <> ".") evaltime
-
-    mkFetchErrorSummary :: Text -> Maybe Text
-    mkFetchErrorSummary fetcherrmsg =
-      let limit = 65535
-          fetcherrmsgLines = Text.lines fetcherrmsg
-          maxLines = length fetcherrmsgLines
-          indentPrefix = indentLine ""
-       in binarySearch 0 limit $ \numLines ->
-            let parts =
-                  singleton "Fetch error:\n\n"
-                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
-                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines fetcherrmsgLines)
-                totalLength = foldr' ((+) . Text.length) 0 parts
-             in ( totalLength < limit && numLines < maxLines,
-                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
-                )
-
-    mkEvalErrorSummary :: Text -> Maybe Text
-    mkEvalErrorSummary errmsg =
-      let limit = 65535
-          errmsgLines = Text.lines errmsg
-          maxLines = length errmsgLines
-          indentPrefix = indentLine ""
-       in binarySearch 0 limit $ \numLines ->
-            let parts =
-                  singleton "Evaluation error:\n\n"
-                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
-                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines errmsgLines)
-                totalLength = foldr' ((+) . Text.length) 0 parts
-             in ( totalLength < limit && numLines < maxLines,
-                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
-                )
 
 statusHandler ::
   Text ->
