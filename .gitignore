@@ -7,4 +7,8 @@ node_modules/
 # Nix
 .direnv
 .nixos-test-history
+result
 
+# Claude Code/OpenCode
+.claude
+AGENTS.md
