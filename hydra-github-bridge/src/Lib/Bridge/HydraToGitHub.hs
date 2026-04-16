@@ -48,7 +48,7 @@ import Data.Foldable (foldr')
 import Data.Functor ((<&>))
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.List (find, intercalate, singleton)
-import Data.Maybe (isNothing)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.String (fromString)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
@@ -78,7 +78,7 @@ import Lib.GitHub (CheckRun, CheckRunConclusion, TokenLease)
 import Lib.GitHub qualified as GitHub
 import Lib.Hydra (BuildStatus)
 import Lib.Hydra qualified as Hydra
-import Lib.Hydra.DB (readBuildLog)
+import Lib.Hydra.DB qualified as DB
 import Network.HTTP.Client qualified as HTTP
 import Text.Regex.TDFA ((=~))
 
@@ -394,7 +394,7 @@ handleEvalStarted ::
   Hydra.JobSetId ->
   IO [GitHub.CheckRun]
 handleEvalStarted conn host jid = do
-  [(proj, name, flake, triggertime)] <- query conn "select project, name, flake, triggertime from jobsets where id = ?" (Only jid)
+  (proj, name, flake, triggertime) <- DB.fetchJobsetBasic conn jid
   Text.putStrLn $ "Eval Started (" <> tshow jid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> tshow flake
   withGithubFlake flake $ \owner repo hash ->
     pure $
@@ -422,8 +422,8 @@ handleEvalDone ::
   Text ->
   IO [GitHub.CheckRun]
 handleEvalDone conn host stateDir jid eid eventName = do
-  [(proj, name, flake, errmsg, fetcherrmsg)] <- query conn "select project, name, flake, errormsg, fetcherrormsg from jobsets where id = ?" (Only jid)
-  [(flake', timestamp, checkouttime, evaltime)] <- query conn "select flake, timestamp, checkouttime, evaltime from jobsetevals where id = ?" (Only eid) :: IO [(Text, Int, Int, Int)]
+  (proj, name, flake, errmsg, fetcherrmsg, _) <- DB.fetchJobsetErrors conn jid
+  (flake', timestamp, checkouttime, evaltime) <- DB.fetchJobsetEval conn eid
   Text.putStrLn $ "Eval " <> eventName <> " (" <> tshow jid <> ", " <> tshow eid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> flake <> " eval for: " <> flake'
   withGithubFlake flake' $ \owner repo hash -> do
     let evalStatuses =
@@ -439,41 +439,9 @@ handleEvalDone conn host stateDir jid eid eventName = do
             errmsg
             fetcherrmsg
 
-    -- If this evaluation has builds (is not identical to a previous one), this selects no rows.
-    -- Otherwise this selects all builds of the latest previous evaluation that differed from its predecessor.
-    -- We then submit a status for each of these builds to the jobset's flake URL (the current one).
-    -- This is necessary because `(cached_)?build_finished` notifications are not sent by Hydra
-    -- when an evaluation is identical to its predecessor / has no builds.
-    rows <-
-      query
-        conn
-        "\
-        \WITH prev_jobseteval AS (              \
-        \    SELECT *                           \
-        \    FROM jobsetevals                   \
-        \    WHERE                              \
-        \        id < ? AND                     \
-        \        jobset_id = ? AND              \
-        \        hasnewbuilds = 1               \
-        \    ORDER BY id DESC                   \
-        \    FETCH FIRST ROW ONLY               \
-        \)                                      \
-        \SELECT b.id, b.job, b.buildstatus      \
-        \FROM builds b                          \
-        \JOIN prev_jobseteval e ON NOT EXISTS ( \
-        \    SELECT NULL                        \
-        \    FROM jobsetevals                   \
-        \    WHERE                              \
-        \        id = ? AND                     \
-        \        hasnewbuilds = 1               \
-        \)                                      \
-        \JOIN jobsetevalmembers m ON            \
-        \    m.build = b.id AND                 \
-        \    m.eval = e.id                      \
-        \WHERE b.finished = 1                   \
-        \ "
-        [eid, jid, eid] ::
-        IO [(Int, Text, Int)]
+    -- Hydra doesn't send build_finished notifications for cached evals, so we fetch each
+    -- of these builds and submit a status current jobset's flake URL
+    rows <- DB.fetchCachedEvalBuilds conn eid jid
     buildStatuses <-
       mapM
         ( \(bid, job, status) ->
@@ -660,7 +628,7 @@ handleEvalFailed ::
   Hydra.JobSetId ->
   IO [GitHub.CheckRun]
 handleEvalFailed conn host jid = do
-  [(proj, name, flake, fetcherrormsg, errormsg, errortime)] <- query conn "select project, name, flake, fetcherrormsg, errormsg, errortime from jobsets where id = ?" (Only jid)
+  (proj, name, flake, errormsg, fetcherrormsg, errortime) <- DB.fetchJobsetErrors conn jid
   Text.putStrLn $ "Eval Failed (" <> tshow jid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> tshow (parseGitHubFlakeURI flake)
   withGithubFlake flake $ \owner repo hash ->
     pure $
@@ -674,7 +642,7 @@ handleEvalFailed conn host jid = do
               status = GitHub.Completed,
               conclusion = Just GitHub.Failure,
               startedAt = Nothing, -- Hydra does not record this information but GitHub still has it
-              completedAt = Just . posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral (errortime :: Int),
+              completedAt = posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral <$> errortime,
               output =
                 Just $
                   GitHub.CheckRunOutput
@@ -694,11 +662,11 @@ handleBuildQueued ::
   Hydra.BuildId ->
   IO [GitHub.CheckRun]
 handleBuildQueued conn host bid = do
-  [(proj, name, flake, job, desc)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description" <> sqlFromBuild) (Only bid)
+  (proj, name, flake, job, desc) <- DB.fetchBuildBasic conn bid
   Text.putStrLn $ "Build Queued (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
-  steps <- query conn ("SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2") (Only bid) :: IO [(Only (Maybe Int))]
+  steps <- DB.fetchRecentBuildSteps conn bid
   let prevStepStatus
-        | length steps >= 2 = (\(Only statusInt) -> statusInt <&> toEnum) $ steps !! 1
+        | length steps >= 2 = (<&> toEnum) $ steps !! 1
         | otherwise = Nothing
   whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
     pure $
@@ -715,8 +683,6 @@ handleBuildQueued conn host bid = do
               completedAt = Nothing,
               output = Nothing
             }
-  where
-    sqlFromBuild = " from builds b JOIN jobsets j on b.jobset_id = j.id JOIN jobsetevalmembers m on m.build = b.id JOIN jobsetevals e on e.id = m.eval where b.id = ? order by e.id desc fetch first row only"
 
 handleBuildStarted ::
   Connection ->
@@ -724,11 +690,11 @@ handleBuildStarted ::
   Hydra.BuildId ->
   IO [GitHub.CheckRun]
 handleBuildStarted conn host bid = do
-  [(proj, name, flake, job, desc, starttime)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description, b.starttime" <> sqlFromBuild) (Only bid)
+  (proj, name, flake, job, desc, starttime) <- DB.fetchBuildStarted conn bid
   Text.putStrLn $ "Build Started (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
-  steps <- query conn ("SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2") (Only bid) :: IO [(Only (Maybe Int))]
+  steps <- DB.fetchRecentBuildSteps conn bid
   let prevStepStatus
-        | length steps >= 2 = (\(Only statusInt) -> statusInt <&> toEnum) $ steps !! 1
+        | length steps >= 2 = (<&> toEnum) $ steps !! 1
         | otherwise = Nothing
   whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
     pure $
@@ -746,8 +712,6 @@ handleBuildStarted conn host bid = do
               completedAt = Nothing,
               output = Nothing
             }
-  where
-    sqlFromBuild = " from builds b JOIN jobsets j on b.jobset_id = j.id JOIN jobsetevalmembers m on m.build = b.id JOIN jobsetevals e on e.id = m.eval where b.id = ? order by e.id desc fetch first row only"
 
 handleBuildFinished ::
   Connection ->
@@ -758,18 +722,16 @@ handleBuildFinished ::
   IO [GitHub.CheckRun]
 handleBuildFinished conn host stateDir bid depBids = do
   -- note; buildstatus is only != NULL for Finished, Queued and Started leave it as NULL.
-  [(proj, name, flake, job, desc, finished, status)] <- query conn ("select j.project, j.name, e.flake, b.job, b.description, b.finished, b.buildstatus" <> sqlFromBuild) (Only bid)
+  (proj, name, flake, job, desc, finished, status) <- DB.fetchBuildFinished conn bid
   Text.putStrLn $ "Build Finished (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
   withGithubFlake flake $ \owner repo hash -> do
     checkRun <- handleBuildDone conn host stateDir bid job status (finished == (1 :: Int)) owner repo hash
     depCheckRuns <-
       sequence $
         (if toEnum status /= Hydra.Succeeded then depBids else []) <&> \depBid -> do
-          [(depJob, depStatus, depFinished)] <- query conn "SELECT job, buildstatus, finished FROM builds WHERE id = ?" (Only depBid)
+          (depJob, depStatus, depFinished) <- DB.fetchBuildStatus conn depBid
           handleBuildDone conn host stateDir depBid depJob depStatus (depFinished == (1 :: Int)) owner repo hash
     return $ checkRun ++ concat depCheckRuns
-  where
-    sqlFromBuild = " from builds b JOIN jobsets j on b.jobset_id = j.id JOIN jobsetevalmembers m on m.build = b.id JOIN jobsetevals e on e.id = m.eval where b.id = ? order by e.id desc fetch first row only"
 
 handleBuildDone ::
   Connection ->
@@ -788,7 +750,7 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
   let ghCheckRunConclusion
         | finished = toCheckRunConclusion buildStatus
         | otherwise = GitHub.Failure
-  steps <- query conn ("SELECT stepnr, drvpath, status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC") (Only bid) :: IO [(Int, String, Maybe Int)]
+  steps <- DB.fetchBuildSteps conn bid
   let prevStepStatus
         | length steps >= 2 = (\(_, _, statusInt) -> statusInt <&> toEnum) $ steps !! 1
         | otherwise = Nothing
@@ -802,13 +764,13 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
       mapM
         ( \(stepnr, drvpath, _) -> do
             logs <-
-              catch @SomeException (readBuildLog stateDir drvpath) $ \err -> do
+              catch @SomeException (DB.readBuildLog stateDir drvpath) $ \err -> do
                 Text.putStrLn $ "Warning: could not fetch logs: " <> Text.show err
                 pure Nothing
             pure (stepnr, drvpath, logs)
         )
         failedSteps
-    output <- query conn ("SELECT path FROM buildoutputs WHERE name = 'out' and build = ? LIMIT 1") (Only bid) :: IO [(Only Text)]
+    output <- DB.fetchBuildOutput conn bid
     pure $
       singleton $
         GitHub.CheckRun owner repo $
@@ -832,74 +794,21 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
   where
     getBuildTimes :: IO (Maybe (UTCTime, UTCTime))
     getBuildTimes = do
-      rows <-
-        query
-          conn
-          "\
-          \WITH                                                          \
-          \    given_build AS (                                          \
-          \        SELECT *                                              \
-          \        FROM builds                                           \
-          \        WHERE id = ?                                          \
-          \    ),                                                        \
-          \    given_build_output AS (                                   \
-          \        SELECT o.*                                            \
-          \        FROM buildoutputs o                                   \
-          \        JOIN given_build g_b ON o.build = g_b.id              \
-          \        FETCH FIRST ROW ONLY                                  \
-          \    ),                                                        \
-          \    actual_build_step AS (                                    \
-          \        SELECT s.*                                            \
-          \        FROM buildsteps s                                     \
-          \        JOIN buildstepoutputs o ON                            \
-          \            o.build = s.build AND                             \
-          \            o.stepnr = s.stepnr                               \
-          \        JOIN given_build_output g_b_o ON o.path = g_b_o.path  \
-          \        WHERE s.busy = 0                                      \
-          \        ORDER BY s.status, s.stoptime DESC                    \
-          \        FETCH FIRST ROW ONLY                                  \
-          \    ),                                                        \
-          \    actual_build AS (                                         \
-          \        SELECT b.*                                            \
-          \        FROM builds b                                         \
-          \        JOIN actual_build_step a_b_s ON a_b_s.build = b.id    \
-          \    ),                                                        \
-          \    given_build_maybe AS (                                    \
-          \        SELECT *                                              \
-          \        FROM given_build                                      \
-          \        WHERE                                                 \
-          \            finished = 0 OR                                   \
-          \            iscachedbuild = 0                                 \
-          \    ),                                                        \
-          \    selected_build AS (                                       \
-          \        SELECT *                                              \
-          \        FROM given_build_maybe                                \
-          \                                                              \
-          \        UNION ALL                                             \
-          \                                                              \
-          \        SELECT *                                              \
-          \        FROM actual_build                                     \
-          \        WHERE NOT EXISTS (SELECT NULL FROM given_build_maybe) \
-          \    )                                                         \
-          \SELECT selected_build.starttime, selected_build.stoptime      \
-          \FROM selected_build                                           \
-          \ "
-          (Only bid) ::
-          IO [(Int, Int)]
-      pure $ case rows of
-        [(starttime, stoptime)] ->
+      buildTimes <- DB.fetchActualBuildTimes conn bid
+      pure $ case buildTimes of
+        Just (starttime, stoptime) ->
           Just
             ( posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral starttime,
               posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral stoptime
             )
-        _ -> Nothing
+        Nothing -> Nothing
 
     mkCheckSummary output failedSteps = \case
       Hydra.Succeeded ->
         -- TODO: This is only the "out" path, maybe we do want to put _all_ paths in here JSON encoded?
         -- The idea is that on successful builds, we can grab the nix paths (if needed) directly out of the
         -- github status. And use it for nix-store -r, or similar.
-        Text.intercalate ", " (fmap fromOnly output)
+        fromMaybe "" output
       _ -> tshow (length failedSteps) <> " failed steps"
 
     mkCheckText :: [(Int, String, Maybe Text)] -> BuildStatus -> Maybe Text
