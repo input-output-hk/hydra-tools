@@ -74,7 +74,7 @@ import Lib (binarySearch)
 import Lib.Data.Duration (humanReadableDuration)
 import Lib.Data.List (takeEnd)
 import Lib.Data.Text (indentLine)
-import Lib.GitHub (CheckRunConclusion, TokenLease)
+import Lib.GitHub (CheckRun, CheckRunConclusion, TokenLease)
 import Lib.GitHub qualified as GitHub
 import Lib.Hydra (BuildStatus)
 import Lib.Hydra qualified as Hydra
@@ -426,98 +426,19 @@ handleEvalDone conn host stateDir jid eid eventName = do
   [(flake', timestamp, checkouttime, evaltime)] <- query conn "select flake, timestamp, checkouttime, evaltime from jobsetevals where id = ?" (Only eid) :: IO [(Text, Int, Int, Int)]
   Text.putStrLn $ "Eval " <> eventName <> " (" <> tshow jid <> ", " <> tshow eid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> flake <> " eval for: " <> flake'
   withGithubFlake flake' $ \owner repo hash -> do
-    let startedAt = posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral timestamp
-        fetchCompletedAt = addUTCTime (fromIntegral checkouttime) startedAt
-        evalCompletedAt = addUTCTime (fromIntegral evaltime) fetchCompletedAt
-        summary = mkEvalDurationSummary checkouttime (if isNothing fetcherrmsg then Just evaltime else Nothing)
-    evalStatuses <- pure $ case (errmsg, fetcherrmsg) :: (Maybe Text, Maybe Text) of
-      (Just err, _)
-        | not (Text.null err) ->
-            ( singleton $
-                GitHub.CheckRun owner repo $
-                  GitHub.CheckRunPayload
-                    { name = "ci/eval",
-                      headSha = hash,
-                      detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
-                      externalId = Just $ tshow eid,
-                      status = GitHub.Completed,
-                      conclusion = Just GitHub.Failure,
-                      startedAt = Just startedAt,
-                      completedAt = Just evalCompletedAt,
-                      output =
-                        Just $
-                          GitHub.CheckRunOutput
-                            { title = "Evaluation has errors",
-                              summary = summary,
-                              text = mkEvalErrorSummary err
-                            }
-                    }
-            )
-              -- Creates a failed check run for each job that failed to evaluate.
-              -- This is temporarily disabled (by simply passing an empty string)
-              -- because there is no way to get rid of these later when the eval
-              -- succeeds on a retry, confusing everyone.
-              ++ ( (parseFailedJobEvals {- err -} "") <&> \(job, msg) ->
-                     GitHub.CheckRun owner repo $
-                       GitHub.CheckRunPayload
-                         { name = "ci/eval:" <> job,
-                           headSha = hash,
-                           detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
-                           externalId = Just $ tshow eid,
-                           status = GitHub.Completed,
-                           conclusion = Just GitHub.Failure,
-                           startedAt = Just startedAt,
-                           completedAt = Just evalCompletedAt,
-                           output =
-                             Just $
-                               GitHub.CheckRunOutput
-                                 { title = "Evaluation failed",
-                                   summary = summary,
-                                   text = mkEvalErrorSummary msg
-                                 }
-                         }
-                 )
-      (_, Just err)
-        | not (Text.null err) ->
-            singleton $
-              GitHub.CheckRun owner repo $
-                GitHub.CheckRunPayload
-                  { name = "ci/eval",
-                    headSha = hash,
-                    detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid <> "#tabs-errors",
-                    externalId = Just $ tshow eid,
-                    status = GitHub.Completed,
-                    conclusion = Just GitHub.Failure,
-                    startedAt = Just startedAt,
-                    completedAt = Just fetchCompletedAt,
-                    output =
-                      Just $
-                        GitHub.CheckRunOutput
-                          { title = "Failed to fetch",
-                            summary = summary,
-                            text = mkFetchErrorSummary err
-                          }
-                  }
-      _ ->
-        singleton $
-          GitHub.CheckRun owner repo $
-            GitHub.CheckRunPayload
-              { name = "ci/eval",
-                headSha = hash,
-                detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow eid,
-                externalId = Just $ tshow eid,
-                status = GitHub.Completed,
-                conclusion = Just GitHub.Success,
-                startedAt = Just startedAt,
-                completedAt = Just evalCompletedAt,
-                output =
-                  Just $
-                    GitHub.CheckRunOutput
-                      { title = "Evaluation succeeded",
-                        summary = summary,
-                        text = Nothing
-                      }
-              }
+    let evalStatuses =
+          mkEvalStatuses
+            eid
+            owner
+            repo
+            hash
+            host
+            timestamp
+            checkouttime
+            evaltime
+            errmsg
+            fetcherrmsg
+
     -- If this evaluation has builds (is not identical to a previous one), this selects no rows.
     -- Otherwise this selects all builds of the latest previous evaluation that differed from its predecessor.
     -- We then submit a status for each of these builds to the jobset's flake URL (the current one).
@@ -553,8 +474,47 @@ handleEvalDone conn host stateDir jid eid eventName = do
         \ "
         [eid, jid, eid] ::
         IO [(Int, Text, Int)]
-    buildStatuses <- sequence $ rows <&> \(bid, job, status) -> handleBuildDone conn host stateDir bid job status True owner repo hash
+    buildStatuses <-
+      mapM
+        ( \(bid, job, status) ->
+            handleBuildDone conn host stateDir bid job status True owner repo hash
+        )
+        rows
     pure $ evalStatuses ++ concat buildStatuses
+
+mkEvalStatuses ::
+  Hydra.EvalId ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
+  Int ->
+  Int ->
+  Int ->
+  Maybe Text ->
+  Maybe Text ->
+  [CheckRun]
+mkEvalStatuses evalId owner repo hash host startTime checkoutTime evalTime errMsg fetchErrMsg =
+  let startedAt = posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral startTime
+      fetchCompletedAt = addUTCTime (fromIntegral checkoutTime) startedAt
+      evalCompletedAt = addUTCTime (fromIntegral evalTime) fetchCompletedAt
+      summary =
+        mkEvalDurationSummary
+          checkoutTime
+          (if isNothing fetchErrMsg then Just evalTime else Nothing)
+   in case (errMsg, fetchErrMsg) of
+        (Just err, _)
+          | not (Text.null err) ->
+              singleton (mkEvalErrorStatus startedAt evalCompletedAt summary err)
+                -- Creates a failed check run for each job that failed to evaluate.
+                -- This is temporarily disabled (by simply passing an empty string)
+                -- because there is no way to get rid of these later when the eval
+                -- succeeds on a retry, confusing everyone.
+                ++ mkFailedJobEvals startedAt evalCompletedAt summary ""
+        (_, Just err)
+          | not (Text.null err) ->
+              [mkFetchErrorStatus startedAt fetchCompletedAt summary err]
+        _ -> [mkEvalSuccessStatus startedAt evalCompletedAt summary]
   where
     mkEvalDurationSummary :: Int -> Maybe Int -> Text
     mkEvalDurationSummary checkouttime evaltime =
@@ -563,10 +523,91 @@ handleEvalDone conn host stateDir jid eid eventName = do
         <> "."
         <> maybe mempty (\j -> "\nEvaluation took " <> humanReadableDuration (fromIntegral j * oneSecond) <> ".") evaltime
 
+    mkEvalErrorStatus startedAt completedAt summary err =
+      GitHub.CheckRun owner repo $
+        GitHub.CheckRunPayload
+          { name = "ci/eval",
+            headSha = hash,
+            detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow evalId <> "#tabs-errors",
+            externalId = Just $ tshow evalId,
+            status = GitHub.Completed,
+            conclusion = Just GitHub.Failure,
+            startedAt = Just startedAt,
+            completedAt = Just completedAt,
+            output =
+              Just $
+                GitHub.CheckRunOutput
+                  { title = "Evaluation has errors",
+                    summary = summary,
+                    text = mkEvalErrorSummary err
+                  }
+          }
+
+    mkFailedJobEvals startedAt completedAt summary err =
+      parseFailedJobEvals err <&> \(job, msg) ->
+        GitHub.CheckRun owner repo $
+          GitHub.CheckRunPayload
+            { name = "ci/eval:" <> job,
+              headSha = hash,
+              detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow evalId <> "#tabs-errors",
+              externalId = Just $ tshow evalId,
+              status = GitHub.Completed,
+              conclusion = Just GitHub.Failure,
+              startedAt = Just startedAt,
+              completedAt = Just completedAt,
+              output =
+                Just $
+                  GitHub.CheckRunOutput
+                    { title = "Evaluation failed",
+                      summary = summary,
+                      text = mkEvalErrorSummary msg
+                    }
+            }
+
+    mkFetchErrorStatus startedAt completedAt summary err =
+      GitHub.CheckRun owner repo $
+        GitHub.CheckRunPayload
+          { name = "ci/eval",
+            headSha = hash,
+            detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow evalId <> "#tabs-errors",
+            externalId = Just $ tshow evalId,
+            status = GitHub.Completed,
+            conclusion = Just GitHub.Failure,
+            startedAt = Just startedAt,
+            completedAt = Just completedAt,
+            output =
+              Just $
+                GitHub.CheckRunOutput
+                  { title = "Failed to fetch",
+                    summary = summary,
+                    text = mkFetchErrorSummary err
+                  }
+          }
+
+    mkEvalSuccessStatus startedAt completedAt summary =
+      GitHub.CheckRun owner repo $
+        GitHub.CheckRunPayload
+          { name = "ci/eval",
+            headSha = hash,
+            detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow evalId,
+            externalId = Just $ tshow evalId,
+            status = GitHub.Completed,
+            conclusion = Just GitHub.Success,
+            startedAt = Just startedAt,
+            completedAt = Just completedAt,
+            output =
+              Just $
+                GitHub.CheckRunOutput
+                  { title = "Evaluation succeeded",
+                    summary = summary,
+                    text = Nothing
+                  }
+          }
+
     -- Given an evaluation's error message, returns the jobs that could not be evaluated and their excerpt from the error message.
     parseFailedJobEvals :: Text -> [(Text, Text)]
     parseFailedJobEvals errormsg =
-      (internal errormsg) <&> \(_, job, msg) -> (job, msg)
+      internal errormsg <&> \(_, job, msg) -> (job, msg)
       where
         internal :: Text -> [(Text, Text, Text)]
         internal rest =
@@ -579,39 +620,39 @@ handleEvalDone conn host stateDir jid eid eventName = do
                in singleton (before, job, msg) ++ next
             _ -> []
 
-    mkEvalErrorSummary :: Text -> Maybe Text
-    mkEvalErrorSummary errmsg =
-      let limit = 65535
-          errmsgLines = Text.lines errmsg
-          maxLines = length errmsgLines
-          indentPrefix = indentLine ""
-       in binarySearch 0 limit $ \numLines ->
-            let parts =
-                  singleton "Evaluation error:\n\n"
-                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
-                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines errmsgLines)
-                totalLength = foldr' ((+) . Text.length) 0 parts
-             in ( totalLength < limit && numLines < maxLines,
-                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
-                )
+mkEvalErrorSummary :: Text -> Maybe Text
+mkEvalErrorSummary errmsg =
+  let limit = 65535
+      errmsgLines = Text.lines errmsg
+      maxLines = length errmsgLines
+      indentPrefix = indentLine ""
+   in binarySearch 0 limit $ \numLines ->
+        let parts =
+              singleton "Evaluation error:\n\n"
+                ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
+                -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                ++ concatMap (\l -> [indentPrefix, l, "\n"]) (takeEnd numLines errmsgLines)
+            totalLength = foldr' ((+) . Text.length) 0 parts
+         in ( totalLength < limit && numLines < maxLines,
+              if totalLength > limit then Nothing else Just . cs $ Text.concat parts
+            )
 
-    mkFetchErrorSummary :: Text -> Maybe Text
-    mkFetchErrorSummary fetcherrmsg =
-      let limit = 65535
-          fetcherrmsgLines = Text.lines fetcherrmsg
-          maxLines = length fetcherrmsgLines
-          indentPrefix = indentLine ""
-       in binarySearch 0 limit $ \numLines ->
-            let parts =
-                  singleton "Fetch error:\n\n"
-                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
-                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines fetcherrmsgLines)
-                totalLength = foldr' ((+) . Text.length) 0 parts
-             in ( totalLength < limit && numLines < maxLines,
-                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
-                )
+mkFetchErrorSummary :: Text -> Maybe Text
+mkFetchErrorSummary fetcherrmsg =
+  let limit = 65535
+      fetcherrmsgLines = Text.lines fetcherrmsg
+      maxLines = length fetcherrmsgLines
+      indentPrefix = indentLine ""
+   in binarySearch 0 limit $ \numLines ->
+        let parts =
+              singleton "Fetch error:\n\n"
+                ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
+                -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                ++ concatMap (\l -> [indentPrefix, l, "\n"]) (takeEnd numLines fetcherrmsgLines)
+            totalLength = foldr' ((+) . Text.length) 0 parts
+         in ( totalLength < limit && numLines < maxLines,
+              if totalLength > limit then Nothing else Just . cs $ Text.concat parts
+            )
 
 handleEvalFailed ::
   Connection ->
@@ -646,40 +687,6 @@ handleEvalFailed conn host jid = do
                           fetcherrormsg
                     }
             }
-  where
-    mkEvalErrorSummary :: Text -> Maybe Text
-    mkEvalErrorSummary errmsg =
-      let limit = 65535
-          errmsgLines = Text.lines errmsg
-          maxLines = length errmsgLines
-          indentPrefix = indentLine ""
-       in binarySearch 0 limit $ \numLines ->
-            let parts =
-                  singleton "Evaluation error:\n\n"
-                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
-                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines errmsgLines)
-                totalLength = foldr' ((+) . Text.length) 0 parts
-             in ( totalLength < limit && numLines < maxLines,
-                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
-                )
-
-    mkFetchErrorSummary :: Text -> Maybe Text
-    mkFetchErrorSummary fetcherrmsg =
-      let limit = 65535
-          fetcherrmsgLines = Text.lines fetcherrmsg
-          maxLines = length fetcherrmsgLines
-          indentPrefix = indentLine ""
-       in binarySearch 0 limit $ \numLines ->
-            let parts =
-                  singleton "Fetch error:\n\n"
-                    ++ (if numLines < maxLines then ["Last ", tshow numLines, " lines:\n\n"] else [])
-                    -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                    ++ (concatMap (\l -> [indentPrefix, l, "\n"]) $ takeEnd numLines fetcherrmsgLines)
-                totalLength = foldr' ((+) . Text.length) 0 parts
-             in ( totalLength < limit && numLines < maxLines,
-                  if totalLength > limit then Nothing else Just . cs $ Text.concat parts
-                )
 
 handleBuildQueued ::
   Connection ->
@@ -818,49 +825,8 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
                 Just $
                   GitHub.CheckRunOutput
                     { title = tshow buildStatus,
-                      summary =
-                        if buildStatus == Hydra.Succeeded
-                          then -- TODO: This is only the "out" path, maybe we do want to put _all_ paths in here JSON encoded?
-                          -- The idea is that on successful builds, we can grab the nix paths (if needed) directly out of the
-                          -- github status. And use it for nix-store -r, or similar.
-                            Text.intercalate ", " (fmap fromOnly output)
-                          else tshow (length failedSteps) <> " failed steps",
-                      text =
-                        if buildStatus == Hydra.Succeeded
-                          then Nothing
-                          else -- TODO: We should include some meta information about the build. Similar to what hydra provides on the
-                          -- build page.
-                            let limit = 65535
-                                maxLines = foldr' max 0 $ failedStepLogs <&> \(_, _, logs) -> maybe 0 Text.length logs
-                                indentPrefix = cs $ indentLine ""
-                                stepLogsLines = failedStepLogs <&> \(stepnr, drvpath, logs) -> (stepnr, drvpath, logs >>= Just . Text.lines)
-                             in binarySearch 0 limit $ \numLines ->
-                                  let parts :: [Text]
-                                      parts =
-                                        singleton "# Failed Steps\n\n"
-                                          <> intercalate
-                                            (singleton "\n")
-                                            ( stepLogsLines <&> \(stepnr, drvpath, logLines) ->
-                                                [ "## Step ",
-                                                  Text.show stepnr,
-                                                  "\n\n",
-                                                  -- making code blocks by indenting instead of triple backticks so they cannot be escaped
-                                                  "### Derivation\n\n",
-                                                  indentPrefix,
-                                                  Text.pack drvpath,
-                                                  "\n\n",
-                                                  "### Log\n\n"
-                                                ]
-                                                  <> (if numLines < maxLines then ["Last ", Text.show numLines, " lines:\n\n"] else [])
-                                                  <> maybe
-                                                    (singleton "*Not available.*\n")
-                                                    ((concatMap (\l -> [indentPrefix, l, "\n"])) . (takeEnd numLines))
-                                                    logLines
-                                            )
-                                      totalLength = foldr' ((+) . Text.length) 0 parts
-                                   in ( totalLength < limit && numLines < maxLines,
-                                        if totalLength > limit then Nothing else Just . cs $ mconcat parts
-                                      )
+                      summary = mkCheckSummary output failedSteps buildStatus,
+                      text = mkCheckText failedStepLogs buildStatus
                     }
             }
   where
@@ -927,6 +893,51 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
               posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral stoptime
             )
         _ -> Nothing
+
+    mkCheckSummary output failedSteps = \case
+      Hydra.Succeeded ->
+        -- TODO: This is only the "out" path, maybe we do want to put _all_ paths in here JSON encoded?
+        -- The idea is that on successful builds, we can grab the nix paths (if needed) directly out of the
+        -- github status. And use it for nix-store -r, or similar.
+        Text.intercalate ", " (fmap fromOnly output)
+      _ -> tshow (length failedSteps) <> " failed steps"
+
+    mkCheckText :: [(Int, String, Maybe Text)] -> BuildStatus -> Maybe Text
+    mkCheckText failedStepLogs = \case
+      Hydra.Succeeded -> Nothing
+      _ ->
+        binarySearch 0 maxTextLength $ \numLines ->
+          let maxLines = foldr' max 0 $ failedStepLogs <&> \(_, _, logs) -> maybe 0 Text.length logs
+              indentPrefix = cs $ indentLine ""
+              stepLogsLines = failedStepLogs <&> \(stepnr, drvpath, logs) -> (stepnr, drvpath, logs >>= Just . Text.lines)
+              parts :: [Text]
+              parts =
+                singleton "# Failed Steps\n\n"
+                  <> intercalate
+                    (singleton "\n")
+                    ( stepLogsLines <&> \(stepnr, drvpath, logLines) ->
+                        [ "## Step ",
+                          Text.show stepnr,
+                          "\n\n",
+                          -- making code blocks by indenting instead of triple backticks so they cannot be escaped
+                          "### Derivation\n\n",
+                          indentPrefix,
+                          Text.pack drvpath,
+                          "\n\n",
+                          "### Log\n\n"
+                        ]
+                          <> (if numLines < maxLines then ["Last ", Text.show numLines, " lines:\n\n"] else [])
+                          <> maybe
+                            (singleton "*Not available.*\n")
+                            ((concatMap (\l -> [indentPrefix, l, "\n"])) . (takeEnd numLines))
+                            logLines
+                    )
+              totalLength = foldr' ((+) . Text.length) 0 parts
+           in ( totalLength < maxTextLength && numLines < maxLines,
+                if totalLength > maxTextLength then Nothing else Just . cs $ mconcat parts
+              )
+
+    maxTextLength = 65535
 
 statusHandler ::
   Text ->
