@@ -43,6 +43,8 @@ common common
                     , servant-github-webhook
                     , stm
                     , warp
+    if os(linux)
+      build-depends: systemd
 
 library
     import: common
@@ -51,6 +53,7 @@ library
                       , Lib.Bridge
                       , Lib.Bridge.GitHubToHydra
                       , Lib.Bridge.HydraToGitHub
+                      , Lib.Systemd
                       , Lib.Hydra
                       , Lib.Hydra.Client
                       , Lib.Hydra.DB
@@ -65,10 +68,11 @@ executable hydra-github-bridge
     import:           common
     ghc-options:      -threaded -rtsopts
     hs-source-dirs:   app, src
-    other-modules:      Lib 
+    other-modules:      Lib
                       , Lib.Bridge
                       , Lib.Bridge.GitHubToHydra
                       , Lib.Bridge.HydraToGitHub
+                      , Lib.Systemd
                       , Lib.GitHub
                       , Lib.GitHub.Client
                       , Lib.GitHub.WebHookServer
