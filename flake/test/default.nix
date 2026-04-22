@@ -51,21 +51,21 @@
             start_all()
 
             # The bridge needs its Hydra user to be created first
-            hydra.systemctl("stop hydra-github-bridge.target")
+            hydra.systemctl("stop hydra-github-bridge.service")
 
             # Wait for Hydra to start
             hydra.wait_for_unit("hydra-server.service")
 
             # Create the bridge user and start the bridge
             hydra.succeed("hydra-create-user bridge --password hydra --role admin")
-            hydra.systemctl("start hydra-github-bridge.target")
+            hydra.systemctl("start hydra-github-bridge.service")
 
             # Wait for GitHub Mock server
             hydra.wait_for_unit("mock-github.service")
             hydra.wait_for_open_port(4010)
 
             # Wait for hydra-github-bridge
-            hydra.wait_for_unit("hydra-github-bridge-all.service")
+            hydra.wait_for_unit("hydra-github-bridge.service")
             hydra.wait_for_open_port(8811, timeout=15)
 
             with subtest("Opening a PR creates check runs"):

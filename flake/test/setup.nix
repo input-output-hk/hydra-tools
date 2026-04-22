@@ -20,7 +20,7 @@
       buildMachinesFiles = [];
     };
 
-    hydra-github-bridge.all = {
+    hydra-github-bridge = {
       enable = true;
       ghAppId = 12345;
       ghAppInstallIds = {
@@ -33,7 +33,6 @@
         "app-key-file"
         {nativeBuildInputs = [pkgs.openssl];}
         "openssl genrsa -out $out";
-      ghTokenFile = pkgs.writeText "gh-secret-file" "secret-token";
       ghSecretFile = pkgs.writeText "gh-secret-file" "secret-token";
       hydraHost = "http://localhost:3000";
       hydraUser = "bridge";
@@ -95,5 +94,5 @@
   };
 
   # These will fail until Hydra and Mock GitHub are running
-  systemd.targets.hydra-github-bridge.after = ["mock-github.service"];
+  systemd.services.hydra-github-bridge.after = ["mock-github.service"];
 }
