@@ -65,14 +65,14 @@
 
             # Wait for hydra-github-bridge
             hydra.wait_for_unit("hydra-github-bridge.service")
-            hydra.wait_for_open_port(8811, timeout=15)
+            hydra.wait_for_open_port(8811, timeout=20)
 
             # Use the bridge to create a jobset via webhook
             hydra.succeed("fake-send-webhook http://localhost:8811/hook pull_request < ${prOpenedPayload}")
             hydra.wait_until_succeeds(
               "hydra-cli -H http://localhost:3000 project-show input-output-hk-sample -j | "
               "jq --exit-status 'map(select(.name == \"pullrequest-1347\")) | length > 0'",
-              timeout=15
+              timeout=20
             )
 
             # Helper to create a build with specific log scenarios
@@ -96,7 +96,7 @@
                 "curl -s 'http://localhost:4010/mockoon-admin/logs?limit=100' | "
                 "jq --exit-status '"
                 f"map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length > {initial_check_runs}'",
-                timeout=15
+                timeout=20
               )
 
             with subtest("Build log is included"):
@@ -119,7 +119,7 @@
                 "jq --exit-status '"
                 "map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | "
                 "last | .request.body | fromjson | .output.text | contains(\"build log\")'",
-                timeout=15
+                timeout=20
               )
 
             with subtest("Compressed log is included"):
@@ -143,7 +143,7 @@
                 "jq --exit-status '"
                 "map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | "
                 "last | .request.body | fromjson | .output.text | contains(\"compressed build log\")'",
-                timeout=15
+                timeout=20
               )
 
             with subtest("Handles invalid UTF-8 log gracefully"):

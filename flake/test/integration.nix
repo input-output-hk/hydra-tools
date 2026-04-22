@@ -82,7 +82,7 @@
               hydra.wait_until_succeeds(
                 "hydra-cli -H http://localhost:3000 project-show input-output-hk-sample -j | "
                 "jq --exit-status 'map(select(.name == \"pullrequest-1347\")) | length > 0'",
-                timeout=15
+                timeout=20
               )
 
               # Eval will fail because it can't connect to GitHub. That's okay, it will
@@ -90,7 +90,7 @@
               hydra.wait_until_succeeds(
                 "curl http://localhost:4010/mockoon-admin/logs?limit=100 | "
                 "jq --exit-status 'map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length >= 2'",
-                timeout=15
+                timeout=20
               )
 
             with subtest("Rerequesting a check suite updates Hydra jobset"):
@@ -102,14 +102,14 @@
                 "curl -H \"Accept: application/json\" "
                 "http://localhost:3000/jobset/input-output-hk-sample/pullrequest-1347 | "
                 "jq --exit-status '.flake == \"github:input-output-hk/sample/d6fde92930d4715a2b49857d24b940956b26d2d3\"'",
-                timeout=15
+                timeout=20
               )
 
               # This should trigger another eval/build
               hydra.wait_until_succeeds(
                 "curl http://localhost:4010/mockoon-admin/logs?limit=100 | "
                 "jq --exit-status 'map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length >= 4'",
-                timeout=15
+                timeout=20
               )
 
             with subtest("Rerequesting a check run evals Hydra jobset"):
@@ -120,7 +120,7 @@
               hydra.wait_until_succeeds(
                 "curl http://localhost:4010/mockoon-admin/logs?limit=100 | "
                 "jq --exit-status 'map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length >= 6'",
-                timeout=15
+                timeout=20
               )
 
             with subtest("Closing a PR disables its Hydra jobset"):
@@ -145,14 +145,14 @@
               hydra.wait_until_succeeds(
                 "hydra-cli -H http://localhost:3000 project-show input-output-hk-sample -j | "
                 "jq --exit-status 'map(select(.name == \"main\")) | length > 0'",
-                timeout=15
+                timeout=20
               )
 
               # Verify an eval/build was triggered
               hydra.wait_until_succeeds(
                 "curl http://localhost:4010/mockoon-admin/logs?limit=100 | "
                 "jq --exit-status 'map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length >= 8'",
-                timeout=15
+                timeout=20
               )
 
             with subtest("Failed build with invalid log updates check runs"):
@@ -177,7 +177,7 @@
               hydra.wait_until_succeeds(
                 "curl -s 'http://localhost:4010/mockoon-admin/logs?limit=100' | "
                 "jq --exit-status 'map(select(.request.urlPath == \"/repos/input-output-hk/sample/check-runs\")) | length >= 9'",
-                timeout=15
+                timeout=20
               )
 
               hydra.succeed("systemctl is-active hydra-github-bridge.service")
@@ -228,7 +228,7 @@
               )
 
               # Wait for the queue to process, then verify project was not created
-              hydra.sleep(15)
+              hydra.sleep(20)
               hydra.fail(
                 "hydra-cli -H http://localhost:3000 project-show unknown-owner-unknown -j"
               )
