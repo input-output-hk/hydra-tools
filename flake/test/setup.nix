@@ -28,11 +28,7 @@
         IntersectMBO = 2;
       };
       ghUserAgent = "hydra-github-bridge";
-      ghAppKeyFile =
-        pkgs.runCommand
-        "app-key-file"
-        {nativeBuildInputs = [pkgs.openssl];}
-        "openssl genrsa -out $out";
+      ghAppKeyFile = ./github-app.key;
       ghSecretFile = pkgs.writeText "gh-secret-file" "secret-token";
       hydraHost = "http://localhost:3000";
       hydraUser = "bridge";
