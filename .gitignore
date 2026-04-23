@@ -5,6 +5,14 @@ hydra-crystal-notify/lib/
 node_modules/
 
 # Nix
-.direnv
 .nixos-test-history
+result
 
+# Direnv
+.direnv
+# env overrides
+.env
+
+# Claude Code/OpenCode
+.claude
+AGENTS.md

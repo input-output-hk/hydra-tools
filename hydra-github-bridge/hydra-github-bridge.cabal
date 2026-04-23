@@ -14,34 +14,35 @@ common common
     default-language: Haskell2010
     build-depends:    base >=4.16 && < 5
                     , aeson
-                    , aeson-schemas
                     , aeson-casing
+                    , aeson-schemas
                     , async
-                    , human-readable-duration
-                    , postgresql-simple
                     , bytestring
+                    , bz2
                     , crypton
                     , crypton-x509
                     , crypton-x509-store
-                    , bz2
-                    , string-conversions
-                    , github-webhooks
-                    , github-rest >= 1.2
-                    , regex-tdfa
-                    , mtl
-                    , megaparsec
-                    , text >= 2
-                    , time
+                    , directory
                     , filepath
+                    , github-rest >= 1.2
+                    , github-webhooks
                     , http-client
                     , http-client-tls
                     , http-types
+                    , human-readable-duration
+                    , megaparsec
+                    , mtl
                     , network-uri
+                    , postgresql-simple
+                    , regex-tdfa
                     , servant
-                    , servant-server
                     , servant-client
                     , servant-github-webhook
+                    , servant-server
                     , stm
+                    , string-conversions
+                    , text >= 2
+                    , time
                     , warp
 
 library

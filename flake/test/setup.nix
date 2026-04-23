@@ -28,11 +28,7 @@
         IntersectMBO = 2;
       };
       ghUserAgent = "hydra-github-bridge";
-      ghAppKeyFile =
-        pkgs.runCommand
-        "app-key-file"
-        {nativeBuildInputs = [pkgs.openssl];}
-        "openssl genrsa -out $out";
+      ghAppKeyFile = ./github-app.key;
       ghSecretFile = pkgs.writeText "gh-secret-file" "secret-token";
       hydraHost = "http://localhost:3000";
       hydraUser = "bridge";
@@ -90,7 +86,7 @@
     };
 
     # We'll want the test to fail if they crash
-    hydra-github-bridge-all.serviceConfig.Restart = lib.mkForce "no";
+    hydra-github-bridge.serviceConfig.Restart = lib.mkForce "no";
   };
 
   # These will fail until Hydra and Mock GitHub are running
