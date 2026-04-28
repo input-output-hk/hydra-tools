@@ -96,7 +96,8 @@ import Text.Read (readMaybe)
 data GitHubToHydraEnv = GitHubToHydraEnv
   { gthEnvHydraClient :: ClientEnv,
     gthEnvGitHubKey :: GitHubKey,
-    gthEnvGhAppInstallIds :: [(Text, Int)]
+    gthEnvGhAppInstallIds :: [(Text, Int)],
+    gthEnvKeepEvals :: Int
   }
 
 newtype GitHubToHydraT m a = GitHubToHydraT
@@ -217,11 +218,14 @@ handleMergeQueuePushed ::
   (Text, Int) ->
   GitHubToHydraT io ()
 handleMergeQueuePushed conn pushEvent headSha (targetBranch, pullReqNumber) = do
+  keepEvals <- asks (.gthEnvKeepEvals)
+
   let owner = hookRepoOwner pushEvent.evPushRepository
       projName = escapeHydraName pushEvent.evPushRepository.whRepoFullName
       jobset =
         Hydra.defHydraFlakeJobset
-          { Hydra.hjName = "merge-queue-" <> Text.show pullReqNumber,
+          { Hydra.hjKeepnr = keepEvals,
+            Hydra.hjName = "merge-queue-" <> Text.show pullReqNumber,
             Hydra.hjDescription = "Merge Queue: PR" <> Text.show pullReqNumber <> " -> " <> targetBranch,
             Hydra.hjFlake = "github:" <> pushEvent.evPushRepository.whRepoFullName <> "/" <> headSha
           }
@@ -256,6 +260,8 @@ handlePushBranch ::
   Text ->
   GitHubToHydraT io ()
 handlePushBranch conn pushEvent headSha = do
+  keepEvals <- asks (.gthEnvKeepEvals)
+
   let owner = hookRepoOwner pushEvent.evPushRepository
       refName =
         fromMaybe
@@ -264,7 +270,8 @@ handlePushBranch conn pushEvent headSha = do
       jobsetName = escapeHydraName refName
       jobset =
         Hydra.defHydraFlakeJobset
-          { Hydra.hjName = jobsetName,
+          { Hydra.hjKeepnr = keepEvals,
+            Hydra.hjName = jobsetName,
             Hydra.hjDescription =
               refName
                 <> " "
@@ -382,13 +389,16 @@ handlePullRequestUpdated ::
   PullRequestEvent ->
   GitHubToHydraT io ()
 handlePullRequestUpdated conn prEvent = do
+  keepEvals <- asks (.gthEnvKeepEvals)
+
   let owner = hookRepoOwner prEvent.evPullReqRepo
       projName = escapeHydraName prEvent.evPullReqRepo.whRepoFullName
       jobsetName = "pullrequest-" <> Text.show prEvent.evPullReqNumber
 
       jobset =
         Hydra.defHydraFlakeJobset
-          { Hydra.hjName = "pullrequest-" <> Text.show prEvent.evPullReqNumber,
+          { Hydra.hjKeepnr = keepEvals,
+            Hydra.hjName = "pullrequest-" <> Text.show prEvent.evPullReqNumber,
             Hydra.hjDescription =
               "PR "
                 <> Text.show prEvent.evPullReqNumber

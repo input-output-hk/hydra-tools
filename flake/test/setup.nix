@@ -37,6 +37,7 @@
       hydraHost = "http://localhost:3000";
       hydraUser = "bridge";
       hydraPassFile = pkgs.writeText "hydra-pass-file" "hydra";
+      hydraKeepEvals = 4;
       port = 8811;
       waitForHydraServerPort = true;
       environmentFile = pkgs.writeText "env" ''
