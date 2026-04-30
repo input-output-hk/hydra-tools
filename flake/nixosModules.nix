@@ -90,6 +90,14 @@
           '';
         };
 
+        hydraKeepEvals = mkOption {
+          type = types.int;
+          default = 2;
+          description = ''
+            The number of evaluations to keep when creating or updating jobsets.
+          '';
+        };
+
         port = mkOption {
           type = types.port;
           default = 8811;
@@ -149,6 +157,7 @@
                   GITHUB_APP_ID = toString cfg.ghAppId;
                   HYDRA_HOST = cfg.hydraHost;
                   HYDRA_DB = cfg.hydraDb;
+                  HYDRA_KEEP_EVALS = toString cfg.hydraKeepEvals;
                   PORT = toString cfg.port;
 
                   GITHUB_APP_INSTALL_IDS = let

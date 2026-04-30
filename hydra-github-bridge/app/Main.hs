@@ -52,14 +52,15 @@ main = do
   api_pass <- maybe mempty Text.pack <$> lookupEnv "HYDRA_PASS"
   port <- maybe 8080 read <$> lookupEnv "PORT"
   stateDir <- getEnv "HYDRA_STATE_DIR"
+  hydraKeepEvals <- maybe 2 read <$> lookupEnv "HYDRA_KEEP_EVALS"
+
   ghEndpointUrl <- maybe "https://api.github.com" cs <$> lookupEnv "GITHUB_ENDPOINT_URL"
   ghUserAgent <- maybe "hydra-github-bridge" cs <$> lookupEnv "GITHUB_USER_AGENT"
   ghKey <- maybe mempty C8.pack <$> lookupEnv "GITHUB_WEBHOOK_SECRET"
-
-  -- Authenticate to GitHub
   ghAppId <- read <$> getEnv "GITHUB_APP_ID"
   ghAppKeyFile <- getEnv "GITHUB_APP_KEY_FILE"
 
+  -- Authenticate to GitHub
   ghAppInstallIds <- getGhAppInstallIds
 
   ghTokens <- fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent ghAppInstallIds
@@ -88,7 +89,8 @@ main = do
         GitHubToHydraEnv
           { gthEnvHydraClient = hceClientEnv env,
             gthEnvGitHubKey = gitHubKey ghKey,
-            gthEnvGhAppInstallIds = ghAppInstallIds
+            gthEnvGhAppInstallIds = ghAppInstallIds,
+            gthEnvKeepEvals = hydraKeepEvals
           }
 
   Async.mapConcurrently_

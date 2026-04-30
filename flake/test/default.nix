@@ -78,6 +78,13 @@
                 "jq --exit-status 'map(select(.name == \"pullrequest-1347\")) | length > 0'",
                 timeout=15
               )
+              # Verify it has the desired properties
+              hydra.wait_until_succeeds(
+                "curl -H \"Accept: application/json\" "
+                "http://localhost:3000/jobset/input-output-hk-sample/pullrequest-1347 | "
+                "jq --exit-status '.keepnr == 4'",
+                timeout=15
+              )
 
               # Eval will fail because it can't connect to GitHub. That's okay, it will
               # still report at least two statuses to GitHub (in_progress and completed).
@@ -139,6 +146,13 @@
               hydra.wait_until_succeeds(
                 "hydra-cli -H http://localhost:3000 project-show input-output-hk-sample -j | "
                 "jq --exit-status 'map(select(.name == \"main\")) | length > 0'",
+                timeout=15
+              )
+              # Verify it has the desired properties
+              hydra.wait_until_succeeds(
+                "curl -H \"Accept: application/json\" "
+                "http://localhost:3000/jobset/input-output-hk-sample/main | "
+                "jq --exit-status '.keepnr == 4'",
                 timeout=15
               )
 
