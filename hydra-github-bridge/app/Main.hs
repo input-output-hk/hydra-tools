@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -8,13 +9,22 @@ module Main where
 
 import Control.Concurrent.Async as Async
 import Data.ByteString.Char8 qualified as C8
+import Data.Functor (void)
 import Data.IORef (newIORef)
 import Data.Maybe (fromMaybe)
 import Data.String.Conversions (cs)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Time (secondsToNominalDiffTime)
 import Database.PostgreSQL.Simple
-import Lib.Bridge.GitHubToHydra (GitHubToHydraEnv (..), app, hydraClient, hydraClientEnv, parseInstallIds)
+import Lib.Bridge.GitHubToHydra
+  ( GitHubToHydraEnv (..),
+    app,
+    hydraClient,
+    hydraClientEnv,
+    parseInstallIds,
+    runApp,
+  )
 import Lib.Bridge.HydraToGitHub
   ( HydraToGitHubEnv (..),
     fetchGitHubTokens,
@@ -22,9 +32,9 @@ import Lib.Bridge.HydraToGitHub
     runHydraToGitHubT,
     statusHandlers,
   )
+import Lib.Bridge.Watchdog (WatchdogEnv (..), mkWatchdogEnv, watchdog)
 import Lib.GitHub (gitHubKey)
 import Lib.Hydra (HydraClientEnv (..))
-import Network.Wai.Handler.Warp (run)
 import System.Environment (getEnv, lookupEnv)
 import System.Exit (die)
 import System.IO (BufferMode (..), hSetBuffering, stderr, stdin, stdout)
@@ -93,21 +103,32 @@ main = do
             gthEnvKeepEvals = hydraKeepEvals
           }
 
+      watchdogInterval = secondsToNominalDiffTime 60
+      idleThreshold = secondsToNominalDiffTime 120
+  watchdogEnv <- mkWatchdogEnv watchdogInterval idleThreshold port
+
+  let heartbeats = watchdogEnv.watchdogHeartbeats
+
+  void . Async.async $
+    withConnect
+      (ConnectInfo db 5432 db_user db_pass "hydra")
+      (watchdog watchdogEnv)
+
   Async.mapConcurrently_
     id
     [ Async.replicateConcurrently_
         numWorkers
         ( withConnect
             (ConnectInfo db 5432 db_user db_pass "hydra")
-            (runHydraToGitHubT hydraToGitHubEnv . statusHandlers)
+            (runHydraToGitHubT hydraToGitHubEnv . statusHandlers heartbeats)
         ),
       withConnect
         (ConnectInfo db 5432 db_user db_pass "hydra")
-        (hydraClient env),
+        (hydraClient heartbeats env),
       withConnect
         (ConnectInfo db 5432 db_user db_pass "hydra")
-        (runHydraToGitHubT hydraToGitHubEnv . notificationWatcher),
+        (runHydraToGitHubT hydraToGitHubEnv . notificationWatcher heartbeats),
       withConnect
         (ConnectInfo db 5432 db_user db_pass "hydra")
-        (run port . app gitHubToHydraEnv)
+        (runApp heartbeats port . app gitHubToHydraEnv)
     ]

@@ -11,6 +11,7 @@ module Lib.Bridge.GitHubToHydra
   ( GitHubToHydraEnv (..),
     GitHubToHydraT (..),
     hydraClientEnv,
+    runApp,
     app,
     singleEndpoint,
     pushHook,
@@ -68,13 +69,16 @@ import GitHub.Data.Webhooks.Payload
     HookUser (..),
     PullRequestTarget (..),
   )
-import Lib.GitHub (GitHubKey, SingleHookEndpointAPI)
+import Lib.Bridge.Watchdog (Heartbeats, updateHeartbeat)
+import Lib.GitHub (BridgeAPI, GitHubKey, HealthEndpointAPI, SingleHookEndpointAPI)
 import Lib.Hydra (Command, HydraClientEnv, HydraJobset)
 import Lib.Hydra qualified as Hydra
 import Network.HTTP.Client (newManager)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types (Status (..))
 import Network.URI (parseURI)
+import Network.Wai.Handler.Warp (run)
+import Network.Wai.Middleware.Select (selectMiddleware, selectMiddlewareExceptRawPathInfo)
 import Servant
   ( Application,
     Context (..),
@@ -114,13 +118,34 @@ newtype GitHubToHydraT m a = GitHubToHydraT
 runGitHubToHydraT :: GitHubToHydraEnv -> GitHubToHydraT m a -> m a
 runGitHubToHydraT env (GitHubToHydraT action) = runReaderT action env
 
+runApp :: Heartbeats -> Int -> Application -> IO ()
+runApp heartbeats port app' =
+  -- Populate the webServer heartbeat at startup
+  updateHeartbeat' >> run port (middleware app')
+  where
+    middleware =
+      selectMiddleware $
+        -- Do not update the heartbeat when checking health. Otherwise, it would always
+        -- appear as busy
+        selectMiddlewareExceptRawPathInfo
+          "/health"
+          heartbeatMiddleware
+
+    updateHeartbeat' = updateHeartbeat heartbeats "webServer"
+    heartbeatMiddleware midapp req resp = updateHeartbeat' >> midapp req resp
+
 app :: GitHubToHydraEnv -> Connection -> Application
 app env@GitHubToHydraEnv {gthEnvGitHubKey} conn =
   Servant.serveWithContextT
-    (Proxy :: Proxy SingleHookEndpointAPI)
+    (Proxy :: Proxy BridgeAPI)
     (gthEnvGitHubKey :. EmptyContext)
     (runGitHubToHydraT env)
-    (singleEndpoint conn)
+    (bridgeServer conn)
+
+bridgeServer ::
+  Connection ->
+  ServerT BridgeAPI (GitHubToHydraT Handler)
+bridgeServer conn = singleEndpoint conn :<|> healthEndpoint
 
 singleEndpoint ::
   Connection ->
@@ -131,6 +156,9 @@ singleEndpoint conn =
     :<|> pullRequestHook conn
     :<|> checkSuiteHook conn
     :<|> checkRunHook conn
+
+healthEndpoint :: ServerT HealthEndpointAPI (GitHubToHydraT Handler)
+healthEndpoint = pure (Just "OK")
 
 -- | Handle push event webhooks under the following cases:
 --
@@ -628,10 +656,12 @@ hydraClientEnv host user pass = do
 
   return $ Hydra.HydraClientEnv host' user pass env
 
-hydraClient :: HydraClientEnv -> Connection -> IO ()
-hydraClient henv@Hydra.HydraClientEnv {hceClientEnv} conn =
+hydraClient :: Heartbeats -> HydraClientEnv -> Connection -> IO ()
+hydraClient heartbeats henv@Hydra.HydraClientEnv {hceClientEnv} conn =
   -- loop forever, working down the hydra commands
-  forever $
+  forever $ do
+    updateHeartbeat heartbeats "hydraClient"
+
     Hydra.readCommand conn >>= \cmd -> do
       result <- Servant.runClientM (handleCmd henv cmd) hceClientEnv
       case result of
