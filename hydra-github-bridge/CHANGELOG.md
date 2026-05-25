@@ -1,5 +1,38 @@
 # Revision history for hydra-github-bridge
 
+## 0.3.0.0 (2026-05-25)
+
+ * Remove multi-instance support in NixOS module:
+
+   ```
+   # Old multi-instance style:
+   services.hydra-github-bridge.public = { 
+     # Service options
+   };
+
+   # New style:
+   services.hydra-github-bridge = { 
+     # Service options
+   };
+   ```
+
+   Additional NixOS module changes:
+
+   * `ghTokenFile` option has been removed; use `ghSecretFile` instead
+   * `enable` default has been changed to `false`
+   * `ghAppKeyFile`, `ghAppId` and `ghAppInstallIds` are all now required
+   * `ghUserAgent` is no longer required
+
+ * Drop x86_64-darwin support due to nixpkgs deprecation of the platform
+
+ * Make Hydra jobset `keepnr` configurable via environment variable `HYDRA_KEEP_EVALS` or
+   NixOS module option `hydraKeepEvals` (default is `2`)
+
+ * Add a watchdog thread that periodically logs per-thread heartbeats and DB/web-server
+   diagnostics. The watchdog only logs; it does not take any other action
+
+ * Fix server crash when reading malformed build logs
+
 ## 0.2.1.0 (2026-03-10)
 
  * Add a `waitForHydraServerPort` NixOS option that adds an ExecStartPost to hydra-server
