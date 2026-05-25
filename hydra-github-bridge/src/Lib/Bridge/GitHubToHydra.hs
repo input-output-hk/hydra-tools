@@ -69,7 +69,7 @@ import GitHub.Data.Webhooks.Payload
     PullRequestTarget (..),
   )
 import Lib.GitHub (GitHubKey, SingleHookEndpointAPI)
-import Lib.Hydra (Command, HydraClientEnv)
+import Lib.Hydra (Command, HydraClientEnv, HydraJobset)
 import Lib.Hydra qualified as Hydra
 import Network.HTTP.Client (newManager)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
@@ -96,7 +96,8 @@ import Text.Read (readMaybe)
 data GitHubToHydraEnv = GitHubToHydraEnv
   { gthEnvHydraClient :: ClientEnv,
     gthEnvGitHubKey :: GitHubKey,
-    gthEnvGhAppInstallIds :: [(Text, Int)]
+    gthEnvGhAppInstallIds :: [(Text, Int)],
+    gthEnvKeepEvals :: Int
   }
 
 newtype GitHubToHydraT m a = GitHubToHydraT
@@ -217,11 +218,14 @@ handleMergeQueuePushed ::
   (Text, Int) ->
   GitHubToHydraT io ()
 handleMergeQueuePushed conn pushEvent headSha (targetBranch, pullReqNumber) = do
+  keepEvals <- asks (.gthEnvKeepEvals)
+
   let owner = hookRepoOwner pushEvent.evPushRepository
       projName = escapeHydraName pushEvent.evPushRepository.whRepoFullName
       jobset =
         Hydra.defHydraFlakeJobset
-          { Hydra.hjName = "merge-queue-" <> Text.show pullReqNumber,
+          { Hydra.hjKeepnr = keepEvals,
+            Hydra.hjName = "merge-queue-" <> Text.show pullReqNumber,
             Hydra.hjDescription = "Merge Queue: PR" <> Text.show pullReqNumber <> " -> " <> targetBranch,
             Hydra.hjFlake = "github:" <> pushEvent.evPushRepository.whRepoFullName <> "/" <> headSha
           }
@@ -256,6 +260,8 @@ handlePushBranch ::
   Text ->
   GitHubToHydraT io ()
 handlePushBranch conn pushEvent headSha = do
+  keepEvals <- asks (.gthEnvKeepEvals)
+
   let owner = hookRepoOwner pushEvent.evPushRepository
       refName =
         fromMaybe
@@ -264,7 +270,8 @@ handlePushBranch conn pushEvent headSha = do
       jobsetName = escapeHydraName refName
       jobset =
         Hydra.defHydraFlakeJobset
-          { Hydra.hjName = jobsetName,
+          { Hydra.hjKeepnr = keepEvals,
+            Hydra.hjName = jobsetName,
             Hydra.hjDescription =
               refName
                 <> " "
@@ -382,13 +389,16 @@ handlePullRequestUpdated ::
   PullRequestEvent ->
   GitHubToHydraT io ()
 handlePullRequestUpdated conn prEvent = do
+  keepEvals <- asks (.gthEnvKeepEvals)
+
   let owner = hookRepoOwner prEvent.evPullReqRepo
       projName = escapeHydraName prEvent.evPullReqRepo.whRepoFullName
       jobsetName = "pullrequest-" <> Text.show prEvent.evPullReqNumber
 
       jobset =
         Hydra.defHydraFlakeJobset
-          { Hydra.hjName = "pullrequest-" <> Text.show prEvent.evPullReqNumber,
+          { Hydra.hjKeepnr = keepEvals,
+            Hydra.hjName = "pullrequest-" <> Text.show prEvent.evPullReqNumber,
             Hydra.hjDescription =
               "PR "
                 <> Text.show prEvent.evPullReqNumber
@@ -638,7 +648,23 @@ hydraClient henv@Hydra.HydraClientEnv {hceClientEnv} conn =
         Right _ -> pure ()
 
 handleCmd :: HydraClientEnv -> Command -> ClientM ()
-handleCmd Hydra.HydraClientEnv {..} (Hydra.CreateOrUpdateJobset repoName projName jobsetName jobset) = do
+handleCmd env = \case
+  Hydra.CreateOrUpdateJobset repo proj jobsetName jobset ->
+    handleCmdUpsertJobset env repo proj jobsetName jobset
+  Hydra.UpdateJobset repo proj jobsetName jobset ->
+    handleCmdUpdateJobset env repo proj jobsetName jobset
+  Hydra.DeleteJobset projName jobsetName -> handleCmdDeleteJobset projName jobsetName
+  Hydra.EvaluateJobset proj jobset force -> handleCmdEvaluateJobset env proj jobset force
+  Hydra.RestartBuild buildId -> handleCmdRestartBuild buildId
+
+handleCmdUpsertJobset ::
+  HydraClientEnv ->
+  Text ->
+  Text ->
+  Text ->
+  HydraJobset ->
+  ClientM ()
+handleCmdUpsertJobset Hydra.HydraClientEnv {..} repoName projName jobsetName jobset = do
   liftIO (putStrLn $ "Processing Create/Update " ++ show projName ++ "/" ++ show jobsetName ++ " from the queue.")
   void $
     Hydra.mkJobset projName jobsetName jobset `on404` do
@@ -657,8 +683,15 @@ handleCmd Hydra.HydraClientEnv {..} (Hydra.CreateOrUpdateJobset repoName projNam
 
   liftIO (putStrLn $ "Processing Update " ++ show projName ++ "/" ++ show jobsetName ++ " triggering push...")
   void $ Hydra.push (Just hceHost) (Just (projName <> ":" <> jobsetName)) Nothing
-  return ()
-handleCmd Hydra.HydraClientEnv {..} (Hydra.UpdateJobset repoName projName jobsetName jobset) = do
+
+handleCmdUpdateJobset ::
+  HydraClientEnv ->
+  Text ->
+  Text ->
+  Text ->
+  HydraJobset ->
+  ClientM ()
+handleCmdUpdateJobset Hydra.HydraClientEnv {..} repoName projName jobsetName jobset = do
   liftIO (putStrLn $ "Processing Update " ++ show projName ++ "/" ++ show jobsetName ++ " from the queue.")
   -- ensure we try to get this first, ...
   void $ Hydra.getJobset projName jobsetName
@@ -676,22 +709,33 @@ handleCmd Hydra.HydraClientEnv {..} (Hydra.UpdateJobset repoName projName jobset
               }
           )
       Hydra.mkJobset projName jobsetName jobset
-
   -- or triggering an eval
   liftIO (putStrLn $ "Processing Update " ++ show projName ++ "/" ++ show jobsetName ++ " triggering push...")
   void $ Hydra.push (Just hceHost) (Just (projName <> ":" <> jobsetName)) Nothing
-  return ()
-handleCmd _ (Hydra.DeleteJobset projName jobsetName) = do
+
+handleCmdDeleteJobset ::
+  Text ->
+  Text ->
+  ClientM ()
+handleCmdDeleteJobset projName jobsetName =
   void $ Hydra.rmJobset projName jobsetName
-  return ()
-handleCmd Hydra.HydraClientEnv {..} (Hydra.EvaluateJobset projName jobsetName force) = do
+
+handleCmdEvaluateJobset ::
+  HydraClientEnv ->
+  Text ->
+  Text ->
+  Bool ->
+  ClientM ()
+handleCmdEvaluateJobset Hydra.HydraClientEnv {..} projName jobsetName force = do
   liftIO (putStrLn $ "Processing Eval " ++ show projName ++ "/" ++ show jobsetName ++ " from the queue. Triggering push...")
   void $ Hydra.push (Just hceHost) (Just (projName <> ":" <> jobsetName)) (Just force)
-  return ()
-handleCmd _ (Hydra.RestartBuild bid) = do
-  liftIO (putStrLn $ "Processing Restart " ++ show bid ++ " from the queue. Triggering restart...")
-  void $ Hydra.restartBuild $ bid
-  return ()
+
+handleCmdRestartBuild ::
+  Int ->
+  ClientM ()
+handleCmdRestartBuild buildId = do
+  liftIO (putStrLn $ "Processing Restart " ++ show buildId ++ " from the queue. Triggering restart...")
+  void $ Hydra.restartBuild buildId
 
 -- combinator for handing 404 (not found)
 on404 :: ClientM a -> ClientM a -> ClientM a
