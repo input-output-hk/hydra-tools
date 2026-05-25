@@ -71,6 +71,7 @@ import GitHub.REST
     queryGitHub,
   )
 import Lib (binarySearch)
+import Lib.Bridge.Watchdog (Heartbeats, updateHeartbeat)
 import Lib.Data.Duration (humanReadableDuration)
 import Lib.Data.List (takeEnd)
 import Lib.Data.Text (indentLine)
@@ -146,8 +147,8 @@ fetchGitHubTokens ghAppId ghAppKeyFile ghEndpointUrl ghUserAgent ghAppInstallIds
     Text.putStrLn $ "Fetched new GitHub App installation token valid for " <> owner <> " until " <> Text.pack (show lease.expiry)
     return (Text.unpack owner, lease)
 
-notificationWatcher :: Connection -> HydraToGitHubT IO ()
-notificationWatcher conn = do
+notificationWatcher :: Heartbeats -> Connection -> HydraToGitHubT IO ()
+notificationWatcher heartbeats conn = do
   host <- asks htgEnvHydraHost
   stateDir <- asks htgEnvHydraStateDir
 
@@ -162,6 +163,8 @@ notificationWatcher conn = do
     _ <- execute_ conn "LISTEN build_finished" -- (build id, dependent build ids...)
     _ <- execute_ conn "LISTEN cached_build_finished" -- (eval id, build id)
     forever $ do
+      updateHeartbeat heartbeats "notificationWatcher"
+
       putStrLn "Waiting for notification..."
       note <- toHydraNotification . traceShowId <$> getNotification conn
       statuses <- handleHydraNotification conn (cs host) stateDir note
@@ -177,8 +180,8 @@ notificationWatcher conn = do
             execute_ conn "NOTIFY github_status"
         )
 
-statusHandlers :: Connection -> HydraToGitHubT IO ()
-statusHandlers conn = do
+statusHandlers :: Heartbeats -> Connection -> HydraToGitHubT IO ()
+statusHandlers heartbeats conn = do
   ghEndpointUrl <- asks htgEnvGhEndpointUrl
   ghUserAgent <- asks htgEnvGhUserAgent
   env <- ask
@@ -270,6 +273,7 @@ statusHandlers conn = do
             _ -> return False
     _ <- liftIO $ execute_ conn "LISTEN github_status"
     let loop = do
+          liftIO $ updateHeartbeat heartbeats "statusHandlers"
           executed <- liftIO processStatuses
           unless executed $ void $ liftIO $ getNotification conn
           when executed loop

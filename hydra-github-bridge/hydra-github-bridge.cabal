@@ -19,6 +19,7 @@ common common
                     , async
                     , bytestring
                     , bz2
+                    , containers
                     , crypton
                     , crypton-x509
                     , crypton-x509-store
@@ -43,6 +44,8 @@ common common
                     , string-conversions
                     , text >= 2
                     , time
+                    , wai
+                    , wai-extra
                     , warp
 
 library
@@ -52,6 +55,7 @@ library
                       , Lib.Bridge
                       , Lib.Bridge.GitHubToHydra
                       , Lib.Bridge.HydraToGitHub
+                      , Lib.Bridge.Watchdog
                       , Lib.Hydra
                       , Lib.Hydra.Client
                       , Lib.Hydra.DB
@@ -70,6 +74,7 @@ executable hydra-github-bridge
                       , Lib.Bridge
                       , Lib.Bridge.GitHubToHydra
                       , Lib.Bridge.HydraToGitHub
+                      , Lib.Bridge.Watchdog
                       , Lib.GitHub
                       , Lib.GitHub.Client
                       , Lib.GitHub.WebHookServer

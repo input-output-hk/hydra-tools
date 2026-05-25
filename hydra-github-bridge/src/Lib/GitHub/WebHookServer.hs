@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 
@@ -11,12 +12,15 @@ module Lib.GitHub.WebHookServer
     PullRequestHookAPI,
     CheckSuiteHookAPI,
     SingleHookEndpointAPI,
+    HealthEndpointAPI,
+    BridgeAPI,
     GitHubKey (..),
     gitHubKey,
   )
 where
 
 import Data.ByteString.Char8 (ByteString)
+import Data.Text (Text)
 import GitHub.Data.Webhooks.Events
   ( CheckRunEvent,
     CheckSuiteEvent,
@@ -24,7 +28,7 @@ import GitHub.Data.Webhooks.Events
     PullRequestEvent,
     PushEvent,
   )
-import Servant (Context (..), HasContextEntry (..), JSON, Post, (:<|>), (:>))
+import Servant (Context (..), Get, HasContextEntry (..), JSON, Post, (:<|>), (:>))
 import Servant.GitHub.Webhook (GitHubEvent, GitHubSignedReqBody, RepoWebhookEvent (..))
 import qualified Servant.GitHub.Webhook as GitHub
 
@@ -66,6 +70,10 @@ type SingleHookEndpointAPI =
            :<|> CheckSuiteHookAPI
            :<|> CheckRunHookAPI
        )
+
+type HealthEndpointAPI = "health" :> Get '[JSON] (Maybe Text)
+
+type BridgeAPI = SingleHookEndpointAPI :<|> HealthEndpointAPI
 
 newtype GitHubKey = GitHubKey (forall result. GitHub.GitHubKey result)
 
