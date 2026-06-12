@@ -188,7 +188,7 @@
           }
           // lib.optionalAttrs cfg.waitForHydraServerPort {
             # Delay systemd's dependencies until Hydra actually listens.
-            # This is needed for After= ordering of the github-hydra-bridge
+            # This is needed for After= ordering of the hydra-github-bridge
             # because that tries to log in to use Hydra's API when it starts.
             hydra-server.postStart = let
               script = pkgs.writeShellApplication {

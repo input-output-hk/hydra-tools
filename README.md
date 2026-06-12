@@ -124,9 +124,9 @@ NixOS modules are provided for easy deployment:
 
 ```nix
 {
-  imports = [ inputs.hydra-tools.nixosModules.github-hydra-bridge ];
+  imports = [ inputs.hydra-tools.nixosModules.hydra-github-bridge ];
   
-  services.github-hydra-bridge = {
+  services.hydra-github-bridge = {
     enable = true;
     hydraHost = "hydra.example.com";
     port = 8811;

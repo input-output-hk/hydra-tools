@@ -5,9 +5,6 @@
 hydra-github-bridge: ## Build hydra-github-bridge package
 	cabal build -j hydra-github-bridge
 
-github-hydra-bridge: ## Build github-hydra-bridge package
-	cabal build -j github-hydra-bridge
-
 all: hydra-github-bridge hydra-attic-bridge ## Build all packages
 
 clean: ## Clean build artifacts
