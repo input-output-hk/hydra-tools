@@ -81,6 +81,7 @@ import Lib.Hydra (BuildStatus)
 import Lib.Hydra qualified as Hydra
 import Lib.Hydra.DB qualified as DB
 import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Types.URI (parseQueryText)
 import Text.Regex.TDFA ((=~))
 
 -- Text utils
@@ -362,6 +363,15 @@ parseGitHubFlakeURI uri
             Text.length hash' == 40 ->
               Just (owner, repo, hash')
         _ -> Nothing
+  | Just rest <- Text.stripPrefix "git+https://github.com/" uri =
+      let (uriPath, uriQuery) = Text.breakOn "?" rest
+       in case Text.splitOn "/" uriPath of
+            [owner, repo]
+              | Just (Just hash) <- lookup "rev" (parseQueryText (cs uriQuery)),
+                -- TODO: hash == 40 is a _very_ poor approximation to ensure this is a sha
+                Text.length hash == 40 ->
+                  Just (owner, repo, hash)
+            _ -> Nothing
   | otherwise = Nothing
   where
     splitFlakeRef t =
