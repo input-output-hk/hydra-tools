@@ -108,7 +108,7 @@
               hydra.wait_until_succeeds(
                 "curl -H \"Accept: application/json\" "
                 "http://localhost:3000/jobset/input-output-hk-sample/pullrequest-1347 | "
-                "jq --exit-status '.flake == \"github:input-output-hk/sample/d6fde92930d4715a2b49857d24b940956b26d2d3\"'",
+                "jq --exit-status '.flake == \"git+https://github.com/input-output-hk/sample?rev=d6fde92930d4715a2b49857d24b940956b26d2d3&submodules=1\"'",
                 timeout=20
               )
 

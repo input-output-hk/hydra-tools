@@ -223,7 +223,7 @@ handleMergeQueueDeleted conn pushEvent headSha (targetBranch, pullReqNumber) = d
         Hydra.defHydraFlakeJobset
           { Hydra.hjName = "merge-queue-" <> Text.show pullReqNumber,
             Hydra.hjDescription = "Merge Queue: PR" <> Text.show pullReqNumber <> " -> " <> targetBranch,
-            Hydra.hjFlake = "github:" <> pushEvent.evPushRepository.whRepoFullName <> "/" <> headSha,
+            Hydra.hjFlake = "git+https://github.com/" <> pushEvent.evPushRepository.whRepoFullName <> "?rev=" <> headSha <> "&submodules=1",
             -- setting visiblity seems to have no effect...
             Hydra.hjVisible = False,
             -- ... so we just disable it.
@@ -255,7 +255,7 @@ handleMergeQueuePushed conn pushEvent headSha (targetBranch, pullReqNumber) = do
           { Hydra.hjKeepnr = keepEvals,
             Hydra.hjName = "merge-queue-" <> Text.show pullReqNumber,
             Hydra.hjDescription = "Merge Queue: PR" <> Text.show pullReqNumber <> " -> " <> targetBranch,
-            Hydra.hjFlake = "github:" <> pushEvent.evPushRepository.whRepoFullName <> "/" <> headSha
+            Hydra.hjFlake = "git+https://github.com/" <> pushEvent.evPushRepository.whRepoFullName <> "?rev=" <> headSha <> "&submodules=1"
           }
 
       jobsetName = "merge-queue-" <> Text.pack (show pullReqNumber)
@@ -305,10 +305,11 @@ handlePushBranch conn pushEvent headSha = do
                 <> " "
                 <> if "refs/heads/" `Text.isPrefixOf` pushEvent.evPushRef then "branch" else "tag",
             Hydra.hjFlake =
-              "github:"
+              "git+https://github.com/"
                 <> pushEvent.evPushRepository.whRepoFullName
-                <> "/"
+                <> "?rev="
                 <> headSha
+                <> "&submodules=1"
           }
       projName = escapeHydraName pushEvent.evPushRepository.whRepoFullName
 
@@ -410,7 +411,7 @@ pullRequestHook conn _ (_, prEvent) =
 --
 --  * name: pullrequest-{n}
 --  * description: PR {n}: {pr title}
---  * flake = "github:${info.head.repo.owner.login}/${info.head.repo.name}/${info.head.ref}";
+--  * flake = "git+https://github.com/${info.head.repo.owner.login}/${info.head.repo.name}?rev=${info.head.sha}&submodules=1";
 handlePullRequestUpdated ::
   (MonadIO io) =>
   Connection ->
@@ -433,10 +434,11 @@ handlePullRequestUpdated conn prEvent = do
                 <> ": "
                 <> prEvent.evPullReqPayload.whPullReqTitle,
             Hydra.hjFlake =
-              "github:"
+              "git+https://github.com/"
                 <> prEvent.evPullReqRepo.whRepoFullName
-                <> "/"
+                <> "?rev="
                 <> prEvent.evPullReqPayload.whPullReqHead.whPullReqTargetSha
+                <> "&submodules=1"
           }
 
   whenKnownInstallId owner prEvent.evPullReqInstallationId . liftIO $ do
@@ -472,10 +474,11 @@ handlePullRequestClosed conn prEvent = do
                 <> ": "
                 <> prEvent.evPullReqPayload.whPullReqTitle,
             Hydra.hjFlake =
-              "github:"
+              "git+https://github.com/"
                 <> repoName
-                <> "/"
-                <> prEvent.evPullReqPayload.whPullReqHead.whPullReqTargetSha,
+                <> "?rev="
+                <> prEvent.evPullReqPayload.whPullReqHead.whPullReqTargetSha
+                <> "&submodules=1",
             -- setting visiblity seems to have no effect...
             Hydra.hjVisible = False,
             -- so we just disable it.
@@ -573,10 +576,11 @@ handleCheckSuiteRerequested conn checkEvent = do
         Hydra.UpdateJobset repoName projName jobsetName $
           jobset
             { Hydra.hjFlake =
-                "github:"
+                "git+https://github.com/"
                   <> repoName
-                  <> "/"
+                  <> "?rev="
                   <> pr.whChecksPullRequestHead.whChecksPullRequestTargetSha
+                  <> "&submodules=1"
             }
 
 -- | Handle check run webhook event. If the action is rerequested (`action = "rerequested"`
