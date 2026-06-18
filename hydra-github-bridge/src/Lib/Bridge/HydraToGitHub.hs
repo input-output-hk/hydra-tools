@@ -340,11 +340,11 @@ toHydraNotification Notification {notificationChannel = chan, notificationData =
   | chan == "cached_build_finished", [_, bid] <- words (cs payload) = Hydra.BuildFinished (read bid) []
   | otherwise = error $ "Unhandled payload for chan: " ++ cs chan ++ ": " ++ cs payload
 
-whenStatusOrJob :: Maybe GitHub.CheckRunConclusion -> Maybe Hydra.BuildStatus -> Text -> IO [GitHub.CheckRun] -> IO [GitHub.CheckRun]
-whenStatusOrJob status prevStepStatus job action
+whenStatusOrJob :: Maybe GitHub.CheckRunConclusion -> Bool -> Text -> IO [GitHub.CheckRun] -> IO [GitHub.CheckRun]
+whenStatusOrJob status priorFailureSent job action
   | or [name `Text.isPrefixOf` job || name `Text.isSuffixOf` job || ("." <> name <> ".") `Text.isInfixOf` job | name <- ["required", "nonrequired"]] = action
   | Just s <- status, s `elem` [GitHub.Failure, GitHub.Cancelled, GitHub.Stale, GitHub.TimedOut] = action
-  | Just pss <- prevStepStatus, pss /= Hydra.Succeeded && maybe True (== GitHub.Success) status = action
+  | priorFailureSent = action
   | otherwise = Text.putStrLn ("Ignoring job: " <> job) >> pure []
 
 withGithubFlake :: Text -> (Text -> Text -> Text -> IO [GitHub.CheckRun]) -> IO [GitHub.CheckRun]
@@ -678,25 +678,24 @@ handleBuildQueued ::
 handleBuildQueued conn host bid = do
   (proj, name, flake, job, desc) <- DB.fetchBuildBasic conn bid
   Text.putStrLn $ "Build Queued (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
-  steps <- DB.fetchRecentBuildSteps conn bid
-  let prevStepStatus
-        | length steps >= 2 = (<&> toEnum) $ steps !! 1
-        | otherwise = Nothing
-  whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
-    pure $
-      singleton $
-        GitHub.CheckRun owner repo $
-          GitHub.CheckRunPayload
-            { name = "ci/hydra-build:" <> job,
-              headSha = hash,
-              detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-              externalId = Just $ tshow bid,
-              status = GitHub.Queued,
-              conclusion = Nothing,
-              startedAt = Nothing,
-              completedAt = Nothing,
-              output = Nothing
-            }
+  withGithubFlake flake $ \owner repo hash -> do
+    let checkRunName = "ci/hydra-build:" <> job
+    priorFailureSent <- DB.hasPriorFailedCheckRun conn owner repo hash checkRunName
+    whenStatusOrJob Nothing priorFailureSent job $
+      pure $
+        singleton $
+          GitHub.CheckRun owner repo $
+            GitHub.CheckRunPayload
+              { name = checkRunName,
+                headSha = hash,
+                detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+                externalId = Just $ tshow bid,
+                status = GitHub.Queued,
+                conclusion = Nothing,
+                startedAt = Nothing,
+                completedAt = Nothing,
+                output = Nothing
+              }
 
 handleBuildStarted ::
   Connection ->
@@ -706,26 +705,25 @@ handleBuildStarted ::
 handleBuildStarted conn host bid = do
   (proj, name, flake, job, desc, starttime) <- DB.fetchBuildStarted conn bid
   Text.putStrLn $ "Build Started (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
-  steps <- DB.fetchRecentBuildSteps conn bid
-  let prevStepStatus
-        | length steps >= 2 = (<&> toEnum) $ steps !! 1
-        | otherwise = Nothing
-  whenStatusOrJob Nothing prevStepStatus job $ withGithubFlake flake $ \owner repo hash ->
-    pure $
-      singleton $
-        GitHub.CheckRun owner repo $
-          GitHub.CheckRunPayload
-            { name = "ci/hydra-build:" <> job,
-              headSha = hash,
-              detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-              externalId = Just $ tshow bid,
-              status = GitHub.InProgress,
-              conclusion = Nothing,
-              -- apparently hydra may send the notification before actually starting the build... got 9 seconds difference when testing!
-              startedAt = (starttime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
-              completedAt = Nothing,
-              output = Nothing
-            }
+  withGithubFlake flake $ \owner repo hash -> do
+    let checkRunName = "ci/hydra-build:" <> job
+    priorFailureSent <- DB.hasPriorFailedCheckRun conn owner repo hash checkRunName
+    whenStatusOrJob Nothing priorFailureSent job $
+      pure $
+        singleton $
+          GitHub.CheckRun owner repo $
+            GitHub.CheckRunPayload
+              { name = checkRunName,
+                headSha = hash,
+                detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+                externalId = Just $ tshow bid,
+                status = GitHub.InProgress,
+                conclusion = Nothing,
+                -- apparently hydra may send the notification before actually starting the build... got 9 seconds difference when testing!
+                startedAt = (starttime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
+                completedAt = Nothing,
+                output = Nothing
+              }
 
 handleBuildFinished ::
   Connection ->
@@ -764,11 +762,10 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
   let ghCheckRunConclusion
         | finished = toCheckRunConclusion buildStatus
         | otherwise = GitHub.Failure
-  steps <- DB.fetchBuildSteps conn bid
-  let prevStepStatus
-        | length steps >= 2 = (\(_, _, statusInt) -> statusInt <&> toEnum) $ steps !! 1
-        | otherwise = Nothing
-  whenStatusOrJob (Just ghCheckRunConclusion) prevStepStatus job $ do
+  let checkRunName = "ci/hydra-build:" <> job
+  priorFailureSent <- DB.hasPriorFailedCheckRun conn owner repo hash checkRunName
+  whenStatusOrJob (Just ghCheckRunConclusion) priorFailureSent job $ do
+    steps <- DB.fetchBuildSteps conn bid
     buildTimes <- getBuildTimes
     let failedSteps =
           filter
@@ -789,7 +786,7 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
       singleton $
         GitHub.CheckRun owner repo $
           GitHub.CheckRunPayload
-            { name = "ci/hydra-build:" <> job,
+            { name = checkRunName,
               headSha = hash,
               detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
               externalId = Just $ tshow bid,

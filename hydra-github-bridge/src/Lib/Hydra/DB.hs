@@ -17,10 +17,10 @@ module Lib.Hydra.DB
     fetchBuildBasic,
     fetchBuildStarted,
     fetchBuildFinished,
-    fetchRecentBuildSteps,
     fetchBuildSteps,
     fetchBuildOutput,
     fetchActualBuildTimes,
+    hasPriorFailedCheckRun,
   )
 where
 
@@ -214,19 +214,6 @@ fetchBuildFinished conn buildId = do
   [res] <- query conn q (Only buildId)
   pure res
 
-fetchRecentBuildSteps ::
-  Connection ->
-  BuildId ->
-  IO [Maybe Int]
-fetchRecentBuildSteps conn buildId = do
-  res <-
-    query
-      conn
-      "SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2"
-      (Only buildId)
-
-  pure (map fromOnly res)
-
 fetchBuildSteps ::
   Connection ->
   BuildId ->
@@ -311,6 +298,31 @@ fetchActualBuildTimes conn buildId = do
   pure $ case res of
     [(starttime, stoptime)] -> Just (starttime, stoptime)
     _ -> Nothing
+
+-- | True iff the bridge has previously enqueued a non-success conclusion
+-- (failure/cancelled/timed_out/stale) for this commit and check-run name.
+-- Used so that once GitHub has been told a job is broken, subsequent
+-- transitions (queued/in_progress/success) keep being reported even for jobs
+-- whose name does not match the required/nonrequired keyword.
+hasPriorFailedCheckRun ::
+  Connection ->
+  Text ->
+  Text ->
+  Text ->
+  Text ->
+  IO Bool
+hasPriorFailedCheckRun conn owner repo headSha name = do
+  [Only exists] <-
+    query
+      conn
+      "SELECT EXISTS (\
+      \  SELECT 1 FROM github_status_payload p \
+      \  JOIN github_status s ON p.status_id = s.id \
+      \  WHERE s.owner = ? AND s.repo = ? AND s.headSha = ? AND s.name = ? \
+      \    AND p.payload->>'conclusion' IN ('failure','cancelled','timed_out','stale') \
+      \)"
+      (owner, repo, headSha, name)
+  pure exists
 
 readBuildLog :: FilePath -> FilePath -> IO (Maybe Text)
 readBuildLog hydraStateDir drvPath = do
