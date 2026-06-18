@@ -53,6 +53,7 @@ library
     hs-source-dirs:   src
     exposed-modules:    Lib
                       , Lib.Bridge
+                      , Lib.Bridge.DB
                       , Lib.Bridge.GitHubToHydra
                       , Lib.Bridge.HydraToGitHub
                       , Lib.Bridge.Watchdog
@@ -66,12 +67,22 @@ library
                       , Lib.Data.List
                       , Lib.Data.Text
 
+test-suite hydra-github-bridge-test
+    import:           common
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Lib.Bridge.HydraToGitHubSpec
+    build-depends:    hydra-github-bridge
+                    , hspec
+
 executable hydra-github-bridge
     import:           common
     ghc-options:      -threaded -rtsopts
     hs-source-dirs:   app, src
-    other-modules:      Lib 
+    other-modules:      Lib
                       , Lib.Bridge
+                      , Lib.Bridge.DB
                       , Lib.Bridge.GitHubToHydra
                       , Lib.Bridge.HydraToGitHub
                       , Lib.Bridge.Watchdog

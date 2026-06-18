@@ -54,7 +54,7 @@ in {
   perSystem = ctx: let
     haskellPkgSet' = haskellPkgSet ctx;
   in {
-    inherit (haskellPkgSet'.flake') devShells;
+    inherit (haskellPkgSet'.flake') devShells checks;
 
     packages = {
       hydra-github-bridge = haskellPkgSet'.getComponent "hydra-github-bridge:exe:hydra-github-bridge";

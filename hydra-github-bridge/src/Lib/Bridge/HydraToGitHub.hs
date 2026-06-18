@@ -21,6 +21,11 @@ module Lib.Bridge.HydraToGitHub
     notificationWatcher,
     statusHandlers,
     parseGitHubFlakeURI,
+    -- Exposed for testing.
+    EmitDecision (..),
+    decideEmit,
+    hasRequiredKeyword,
+    whenStatusOrJob,
   )
 where
 
@@ -71,6 +76,7 @@ import GitHub.REST
     queryGitHub,
   )
 import Lib (binarySearch)
+import Lib.Bridge.DB qualified as BridgeDB
 import Lib.Bridge.Watchdog (Heartbeats, updateHeartbeat)
 import Lib.Data.Duration (humanReadableDuration)
 import Lib.Data.List (takeEnd)
@@ -340,17 +346,61 @@ toHydraNotification Notification {notificationChannel = chan, notificationData =
   | chan == "cached_build_finished", [_, bid] <- words (cs payload) = Hydra.BuildFinished (read bid) []
   | otherwise = error $ "Unhandled payload for chan: " ++ cs chan ++ ": " ++ cs payload
 
-whenStatusOrJob :: Maybe GitHub.CheckRunConclusion -> Bool -> Text -> IO [GitHub.CheckRun] -> IO [GitHub.CheckRun]
-whenStatusOrJob status priorFailureSent job action
-  | or [name `Text.isPrefixOf` job || name `Text.isSuffixOf` job || ("." <> name <> ".") `Text.isInfixOf` job | name <- ["required", "nonrequired"]] = action
-  | Just s <- status, s `elem` [GitHub.Failure, GitHub.Cancelled, GitHub.Stale, GitHub.TimedOut] = action
-  | priorFailureSent = action
-  | otherwise = Text.putStrLn ("Ignoring job: " <> job) >> pure []
+-- | True when the job name contains the @required@ or @nonrequired@ marker
+-- as a prefix, suffix, or dot-delimited component (e.g. @required@,
+-- @build-required@, @x86_64-linux.required.foo@). Such jobs always have their
+-- status reported to GitHub.
+hasRequiredKeyword :: Text -> Bool
+hasRequiredKeyword job =
+  or
+    [ n `Text.isPrefixOf` job
+        || n `Text.isSuffixOf` job
+        || ("." <> n <> ".") `Text.isInfixOf` job
+    | n <- ["required", "nonrequired"]
+    ]
+
+-- | Outcome of 'decideEmit'. 'CheckPriorFailure' means the caller must
+-- additionally consult whether a failure has already been reported for this
+-- commit+job before deciding whether to emit.
+data EmitDecision = Emit | CheckPriorFailure
+  deriving (Eq, Show)
+
+-- | Pure decision: should this Hydra event produce a GitHub status update,
+-- based only on the current conclusion (if known) and the job name?
+decideEmit :: Maybe GitHub.CheckRunConclusion -> Text -> EmitDecision
+decideEmit status job
+  | hasRequiredKeyword job = Emit
+  | Just s <- status, s `elem` GitHub.failureConclusions = Emit
+  | otherwise = CheckPriorFailure
+
+-- | Decide whether to forward a Hydra event to GitHub, then run the supplied
+-- action if so. The prior-failure check is passed as an 'IO Bool' so it is
+-- only executed when 'decideEmit' actually needs it — i.e. never for
+-- required-keyword jobs and never for events that already carry a
+-- failure-class conclusion.
+whenStatusOrJob ::
+  Maybe GitHub.CheckRunConclusion ->
+  IO Bool ->
+  Text ->
+  IO [GitHub.CheckRun] ->
+  IO [GitHub.CheckRun]
+whenStatusOrJob status priorFailureSentIO job action =
+  case decideEmit status job of
+    Emit -> action
+    CheckPriorFailure -> do
+      psf <- priorFailureSentIO
+      if psf
+        then action
+        else Text.putStrLn ("Ignoring job: " <> job) >> pure []
 
 withGithubFlake :: Text -> (Text -> Text -> Text -> IO [GitHub.CheckRun]) -> IO [GitHub.CheckRun]
 withGithubFlake flake action
   | Just (owner, repo, hash) <- parseGitHubFlakeURI flake = action owner repo hash
-  | otherwise = Text.putStrLn ("Failed to parse flake: " <> flake) >> pure []
+  | "github:" `Text.isPrefixOf` flake
+      || "git+https://github.com/" `Text.isPrefixOf` flake =
+      Text.putStrLn ("Failed to parse GitHub flake: " <> flake) >> pure []
+  | otherwise =
+      Text.putStrLn ("Ignoring non-GitHub flake: " <> flake) >> pure []
 
 parseGitHubFlakeURI :: Text -> Maybe (Text, Text, Text)
 parseGitHubFlakeURI uri
@@ -680,22 +730,24 @@ handleBuildQueued conn host bid = do
   Text.putStrLn $ "Build Queued (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
   withGithubFlake flake $ \owner repo hash -> do
     let checkRunName = "ci/hydra-build:" <> job
-    priorFailureSent <- DB.hasPriorFailedCheckRun conn owner repo hash checkRunName
-    whenStatusOrJob Nothing priorFailureSent job $
-      pure $
-        singleton $
-          GitHub.CheckRun owner repo $
-            GitHub.CheckRunPayload
-              { name = checkRunName,
-                headSha = hash,
-                detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-                externalId = Just $ tshow bid,
-                status = GitHub.Queued,
-                conclusion = Nothing,
-                startedAt = Nothing,
-                completedAt = Nothing,
-                output = Nothing
-              }
+    whenStatusOrJob
+      Nothing
+      (BridgeDB.hasPriorReportedFailure conn owner repo hash checkRunName)
+      job
+      $ pure
+      $ singleton
+      $ GitHub.CheckRun owner repo
+      $ GitHub.CheckRunPayload
+        { name = checkRunName,
+          headSha = hash,
+          detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+          externalId = Just $ tshow bid,
+          status = GitHub.Queued,
+          conclusion = Nothing,
+          startedAt = Nothing,
+          completedAt = Nothing,
+          output = Nothing
+        }
 
 handleBuildStarted ::
   Connection ->
@@ -707,23 +759,25 @@ handleBuildStarted conn host bid = do
   Text.putStrLn $ "Build Started (" <> tshow bid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> (job :: Text) <> "(" <> maybe "" id (desc :: Maybe Text) <> ")" <> " " <> tshow (parseGitHubFlakeURI flake)
   withGithubFlake flake $ \owner repo hash -> do
     let checkRunName = "ci/hydra-build:" <> job
-    priorFailureSent <- DB.hasPriorFailedCheckRun conn owner repo hash checkRunName
-    whenStatusOrJob Nothing priorFailureSent job $
-      pure $
-        singleton $
-          GitHub.CheckRun owner repo $
-            GitHub.CheckRunPayload
-              { name = checkRunName,
-                headSha = hash,
-                detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-                externalId = Just $ tshow bid,
-                status = GitHub.InProgress,
-                conclusion = Nothing,
-                -- apparently hydra may send the notification before actually starting the build... got 9 seconds difference when testing!
-                startedAt = (starttime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
-                completedAt = Nothing,
-                output = Nothing
-              }
+    whenStatusOrJob
+      Nothing
+      (BridgeDB.hasPriorReportedFailure conn owner repo hash checkRunName)
+      job
+      $ pure
+      $ singleton
+      $ GitHub.CheckRun owner repo
+      $ GitHub.CheckRunPayload
+        { name = checkRunName,
+          headSha = hash,
+          detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+          externalId = Just $ tshow bid,
+          status = GitHub.InProgress,
+          conclusion = Nothing,
+          -- apparently hydra may send the notification before actually starting the build... got 9 seconds difference when testing!
+          startedAt = (starttime :: Maybe Int) >>= Just . posixSecondsToUTCTime . secondsToNominalDiffTime . fromIntegral,
+          completedAt = Nothing,
+          output = Nothing
+        }
 
 handleBuildFinished ::
   Connection ->
@@ -763,45 +817,48 @@ handleBuildDone conn host stateDir bid job status finished owner repo hash = do
         | finished = toCheckRunConclusion buildStatus
         | otherwise = GitHub.Failure
   let checkRunName = "ci/hydra-build:" <> job
-  priorFailureSent <- DB.hasPriorFailedCheckRun conn owner repo hash checkRunName
-  whenStatusOrJob (Just ghCheckRunConclusion) priorFailureSent job $ do
-    steps <- DB.fetchBuildSteps conn bid
-    buildTimes <- getBuildTimes
-    let failedSteps =
-          filter
-            (\(_, _, statusInt) -> maybe False ((/= Hydra.Succeeded) . toEnum) statusInt)
-            steps
-    failedStepLogs <-
-      mapM
-        ( \(stepnr, drvpath, _) -> do
-            logs <-
-              catch @SomeException (DB.readBuildLog stateDir drvpath) $ \err -> do
-                Text.putStrLn $ "Warning: could not fetch logs: " <> Text.show err
-                pure Nothing
-            pure (stepnr, drvpath, logs)
-        )
-        failedSteps
-    output <- DB.fetchBuildOutput conn bid
-    pure $
-      singleton $
-        GitHub.CheckRun owner repo $
-          GitHub.CheckRunPayload
-            { name = checkRunName,
-              headSha = hash,
-              detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
-              externalId = Just $ tshow bid,
-              status = GitHub.Completed,
-              conclusion = Just ghCheckRunConclusion,
-              startedAt = buildTimes >>= Just . fst,
-              completedAt = buildTimes >>= Just . snd,
-              output =
-                Just $
-                  GitHub.CheckRunOutput
-                    { title = tshow buildStatus,
-                      summary = mkCheckSummary output failedSteps buildStatus,
-                      text = mkCheckText failedStepLogs buildStatus
-                    }
-            }
+  whenStatusOrJob
+    (Just ghCheckRunConclusion)
+    (BridgeDB.hasPriorReportedFailure conn owner repo hash checkRunName)
+    job
+    $ do
+      steps <- DB.fetchBuildSteps conn bid
+      buildTimes <- getBuildTimes
+      let failedSteps =
+            filter
+              (\(_, _, statusInt) -> maybe False ((/= Hydra.Succeeded) . toEnum) statusInt)
+              steps
+      failedStepLogs <-
+        mapM
+          ( \(stepnr, drvpath, _) -> do
+              logs <-
+                catch @SomeException (DB.readBuildLog stateDir drvpath) $ \err -> do
+                  Text.putStrLn $ "Warning: could not fetch logs: " <> Text.show err
+                  pure Nothing
+              pure (stepnr, drvpath, logs)
+          )
+          failedSteps
+      output <- DB.fetchBuildOutput conn bid
+      pure $
+        singleton $
+          GitHub.CheckRun owner repo $
+            GitHub.CheckRunPayload
+              { name = checkRunName,
+                headSha = hash,
+                detailsUrl = Just $ "https://" <> host <> "/build/" <> tshow bid,
+                externalId = Just $ tshow bid,
+                status = GitHub.Completed,
+                conclusion = Just ghCheckRunConclusion,
+                startedAt = buildTimes >>= Just . fst,
+                completedAt = buildTimes >>= Just . snd,
+                output =
+                  Just $
+                    GitHub.CheckRunOutput
+                      { title = tshow buildStatus,
+                        summary = mkCheckSummary output failedSteps buildStatus,
+                        text = mkCheckText failedStepLogs buildStatus
+                      }
+              }
   where
     getBuildTimes :: IO (Maybe (UTCTime, UTCTime))
     getBuildTimes = do
