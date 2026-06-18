@@ -3,6 +3,7 @@
 
 module Lib.Bridge.DB
   ( hasPriorReportedFailure,
+    fetchPriorFailedEvalJobs,
   )
 where
 
@@ -43,3 +44,34 @@ hasPriorReportedFailure conn owner repo headSha name = do
         In (map GitHub.conclusionText GitHub.failureConclusions)
       )
   pure exists
+
+-- | Names of all per-job evaluation check-runs (i.e. @ci/eval:\<job\>@) for
+-- this commit whose most recent payload was a failure-class conclusion. These
+-- are the ones that should be cleared with a fresh success status the next
+-- time the evaluation succeeds.
+fetchPriorFailedEvalJobs ::
+  Connection ->
+  -- | repo owner
+  Text ->
+  -- | repo name
+  Text ->
+  -- | head sha
+  Text ->
+  IO [Text]
+fetchPriorFailedEvalJobs conn owner repo headSha = do
+  rows <-
+    query
+      conn
+      "SELECT s.name FROM github_status s \
+      \WHERE s.owner = ? AND s.repo = ? AND s.headSha = ? \
+      \  AND s.name LIKE 'ci/eval:%' \
+      \  AND ( \
+      \    SELECT p.payload->>'conclusion' FROM github_status_payload p \
+      \    WHERE p.status_id = s.id ORDER BY p.id DESC LIMIT 1 \
+      \  ) IN ?"
+      ( owner,
+        repo,
+        headSha,
+        In (map GitHub.conclusionText GitHub.failureConclusions)
+      )
+  pure (map fromOnly rows)

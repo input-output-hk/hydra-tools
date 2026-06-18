@@ -211,7 +211,7 @@ statusHandlers heartbeats conn = do
                       "JOIN github_status_payload p ON g.id = p.status_id",
                       "WHERE p.id = g.mostRecentPaylodID AND p.sent IS NULL AND p.tries < 5",
                       "ORDER BY",
-                      "  CASE WHEN g.name = 'ci/eval' THEN 0 ELSE 1 END,", -- Prioritize 'ci/eval'
+                      "  CASE WHEN g.name LIKE 'ci/eval%' THEN 0 ELSE 1 END,", -- Prioritize 'ci/eval'
                       "  p.id ASC",
                       "LIMIT 1",
                       "FOR UPDATE SKIP LOCKED"
@@ -490,6 +490,17 @@ handleEvalDone conn host stateDir jid eid eventName = do
   (flake', timestamp, checkouttime, evaltime) <- DB.fetchJobsetEval conn eid
   Text.putStrLn $ "Eval " <> eventName <> " (" <> tshow jid <> ", " <> tshow eid <> "): " <> (proj :: Text) <> ":" <> (name :: Text) <> " " <> flake <> " eval for: " <> flake'
   withGithubFlake flake' $ \owner repo hash -> do
+    -- On a successful evaluation, clear any per-job @ci/eval:\<job\>@
+    -- failures that were previously reported on this commit. The lookup is
+    -- skipped for evals that failed in this run, since there is nothing to
+    -- clear yet.
+    let evalSucceeded =
+          maybe True Text.null errmsg
+            && maybe True Text.null fetcherrmsg
+    priorFailedEvalJobs <-
+      if evalSucceeded
+        then BridgeDB.fetchPriorFailedEvalJobs conn owner repo hash
+        else pure []
     let evalStatuses =
           mkEvalStatuses
             eid
@@ -502,6 +513,7 @@ handleEvalDone conn host stateDir jid eid eventName = do
             evaltime
             errmsg
             fetcherrmsg
+            priorFailedEvalJobs
 
     -- Hydra doesn't send build_finished notifications for cached evals, so we fetch each
     -- of these builds and submit a status current jobset's flake URL
@@ -525,8 +537,12 @@ mkEvalStatuses ::
   Int ->
   Maybe Text ->
   Maybe Text ->
+  -- | Names of per-job @ci/eval:\<job\>@ statuses previously reported as
+  -- failed for this commit. Only consulted on the success branch, where each
+  -- gets a fresh success payload that clears the prior failure on GitHub.
+  [Text] ->
   [CheckRun]
-mkEvalStatuses evalId owner repo hash host startTime checkoutTime evalTime errMsg fetchErrMsg =
+mkEvalStatuses evalId owner repo hash host startTime checkoutTime evalTime errMsg fetchErrMsg priorFailedEvalJobs =
   let startedAt = posixSecondsToUTCTime . secondsToNominalDiffTime $ fromIntegral startTime
       fetchCompletedAt = addUTCTime (fromIntegral checkoutTime) startedAt
       evalCompletedAt = addUTCTime (fromIntegral evalTime) fetchCompletedAt
@@ -537,16 +553,14 @@ mkEvalStatuses evalId owner repo hash host startTime checkoutTime evalTime errMs
    in case (errMsg, fetchErrMsg) of
         (Just err, _)
           | not (Text.null err) ->
-              singleton (mkEvalErrorStatus startedAt evalCompletedAt summary err)
-                -- Creates a failed check run for each job that failed to evaluate.
-                -- This is temporarily disabled (by simply passing an empty string)
-                -- because there is no way to get rid of these later when the eval
-                -- succeeds on a retry, confusing everyone.
-                ++ mkFailedJobEvals startedAt evalCompletedAt summary ""
+              mkEvalErrorStatus startedAt evalCompletedAt summary err
+                : mkFailedJobEvals startedAt evalCompletedAt summary err
         (_, Just err)
           | not (Text.null err) ->
               [mkFetchErrorStatus startedAt fetchCompletedAt summary err]
-        _ -> [mkEvalSuccessStatus startedAt evalCompletedAt summary]
+        _ ->
+          mkEvalSuccessStatus startedAt evalCompletedAt summary
+            : map (mkEvalClearedStatus startedAt evalCompletedAt summary) priorFailedEvalJobs
   where
     mkEvalDurationSummary :: Int -> Maybe Int -> Text
     mkEvalDurationSummary checkouttime evaltime =
@@ -631,6 +645,29 @@ mkEvalStatuses evalId owner repo hash host startTime checkoutTime evalTime errMs
               Just $
                 GitHub.CheckRunOutput
                   { title = "Evaluation succeeded",
+                    summary = summary,
+                    text = Nothing
+                  }
+          }
+
+    -- \| A success payload reusing an existing @ci/eval:\<job\>@ name. Sent
+    -- when a previously-failed per-job eval succeeds on a later retry, so
+    -- GitHub no longer shows the stale failure.
+    mkEvalClearedStatus startedAt completedAt summary jobCheckRunName =
+      GitHub.CheckRun owner repo $
+        GitHub.CheckRunPayload
+          { name = jobCheckRunName,
+            headSha = hash,
+            detailsUrl = Just $ "https://" <> host <> "/eval/" <> tshow evalId,
+            externalId = Just $ tshow evalId,
+            status = GitHub.Completed,
+            conclusion = Just GitHub.Success,
+            startedAt = Just startedAt,
+            completedAt = Just completedAt,
+            output =
+              Just $
+                GitHub.CheckRunOutput
+                  { title = "Evaluation succeeded on retry",
                     summary = summary,
                     text = Nothing
                   }
