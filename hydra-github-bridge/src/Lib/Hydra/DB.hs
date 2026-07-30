@@ -17,7 +17,6 @@ module Lib.Hydra.DB
     fetchBuildBasic,
     fetchBuildStarted,
     fetchBuildFinished,
-    fetchRecentBuildSteps,
     fetchBuildSteps,
     fetchBuildOutput,
     fetchActualBuildTimes,
@@ -213,19 +212,6 @@ fetchBuildFinished conn buildId = do
 
   [res] <- query conn q (Only buildId)
   pure res
-
-fetchRecentBuildSteps ::
-  Connection ->
-  BuildId ->
-  IO [Maybe Int]
-fetchRecentBuildSteps conn buildId = do
-  res <-
-    query
-      conn
-      "SELECT status FROM buildsteps WHERE build = ? ORDER BY stepnr DESC LIMIT 2"
-      (Only buildId)
-
-  pure (map fromOnly res)
 
 fetchBuildSteps ::
   Connection ->
